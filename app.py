@@ -5,7 +5,7 @@ from datetime import datetime
 import google.generativeai as genai
 
 # --- 1. SETUP & CONFIG ---
-st.set_page_config(page_title="DeskBot: Gemini PRO", page_icon="🤖", layout="wide")
+st.set_page_config(page_title="DeskBot: GEM PRO", page_icon="🤖", layout="wide")
 
 # Connect to Google Gemini using your Secret Key
 if "GOOGLE_API_KEY" in st.secrets:
@@ -79,8 +79,8 @@ def ask_gemini(user_message, task_list_text):
         return f"⚠️ AI Error: {e}"
 
 # --- 4. THE UI ---
-st.title("🤖 DeskBot: AI Agent")
-st.caption("Powered by Google Gemini pro")
+st.title("🤖 DeskBot: GEM PRO")
+st.caption("Powered by Google Gemini PRO")
 
 col1, col2 = st.columns([1, 2])
 
@@ -139,6 +139,4 @@ with col2:
                 # We send the prompt AND the current task list to Gemini
                 ai_reply = ask_gemini(prompt, task_context)
                 st.markdown(ai_reply)
-
         st.session_state.messages.append({"role": "assistant", "content": ai_reply})
-
