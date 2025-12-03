@@ -1,18 +1,23 @@
 import streamlit as st
 import sqlite3
 import pandas as pd
-from datetime import datetime, time, timedelta
-import io
-from ics import Calendar
+from datetime import datetime
+import google.generativeai as genai
 
-# --- 1. SETUP & DATABASE ---
-st.set_page_config(page_title="DeskBot MVP", page_icon="🤖", layout="wide")
+# --- 1. SETUP & CONFIG ---
+st.set_page_config(page_title="DeskBot: AI Agent", page_icon="🤖", layout="wide")
 
-# This connects to a file named 'deskbot.db'. If it doesn't exist, it creates it.
+# Connect to Google Gemini using your Secret Key
+if "GOOGLE_API_KEY" in st.secrets:
+    genai.configure(api_key=st.secrets["GOOGLE_API_KEY"])
+    model = genai.GenerativeModel('gemini-1.5-flash')
+else:
+    st.error("⚠️ Google API Key missing! Please add it to Streamlit Secrets.")
+
+# Database Setup
 def init_db():
     conn = sqlite3.connect("deskbot.db")
     c = conn.cursor()
-    # Create table for Tasks
     c.execute('''CREATE TABLE IF NOT EXISTS tasks (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     title TEXT,
@@ -20,34 +25,14 @@ def init_db():
                     due_date TEXT,
                     status TEXT DEFAULT 'todo'
                 )''')
-    # Create table for Calendar Events
-    c.execute('''CREATE TABLE IF NOT EXISTS events (
-                    id TEXT PRIMARY KEY,
-                    title TEXT,
-                    start_dt TEXT,
-                    end_dt TEXT
-                )''')
     conn.commit()
     conn.close()
 
-# Run the setup immediately
 init_db()
 
 # --- 2. HELPER FUNCTIONS ---
-def get_db_connection():
-    return sqlite3.connect("deskbot.db", check_same_thread=False)
-
-def add_task(title, est, due):
-    conn = get_db_connection()
-    c = conn.cursor()
-    c.execute("INSERT INTO tasks (title, est_minutes, due_date) VALUES (?, ?, ?)", 
-              (title, est, str(due)))
-    conn.commit()
-    conn.close()
-
 def get_tasks():
-    conn = get_db_connection()
-    # We use pandas to easily read the SQL data into a table format
+    conn = sqlite3.connect("deskbot.db")
     try:
         df = pd.read_sql("SELECT * FROM tasks", conn)
     except:
@@ -55,58 +40,103 @@ def get_tasks():
     conn.close()
     return df
 
+def add_task(title, est, due):
+    conn = sqlite3.connect("deskbot.db")
+    c = conn.cursor()
+    c.execute("INSERT INTO tasks (title, est_minutes, due_date) VALUES (?, ?, ?)", 
+              (title, est, str(due)))
+    conn.commit()
+    conn.close()
+
 def delete_task(task_id):
-    conn = get_db_connection()
+    conn = sqlite3.connect("deskbot.db")
     c = conn.cursor()
     c.execute("DELETE FROM tasks WHERE id=?", (task_id,))
     conn.commit()
     conn.close()
 
-# --- 3. THE APP INTERFACE ---
-st.title("🤖 DeskBot: Smart Assistant")
-st.write("I now have a **Database**, so I will remember what you tell me!")
+# --- 3. THE AI BRAIN ---
+def ask_gemini(user_message, task_list_text):
+    """Sends user message + current tasks to Gemini to get a smart response."""
+    try:
+        # We give the AI context so it knows it is a Secretary
+        system_instruction = f"""
+        You are DeskBot, a helpful personal productivity secretary.
+        
+        Here are the user's current tasks:
+        {task_list_text}
+        
+        User's message: "{user_message}"
+        
+        Instructions:
+        1. If the user asks to add a task, confirm the details (but tell them to use the side panel for now).
+        2. If the user asks for advice, prioritize their tasks based on the list above.
+        3. Be concise, friendly, and proactive.
+        """
+        response = model.generate_content(system_instruction)
+        return response.text
+    except Exception as e:
+        return f"⚠️ AI Error: {e}"
+
+# --- 4. THE UI ---
+st.title("🤖 DeskBot: AI Agent")
+st.caption("Powered by Google Gemini 1.5 Flash")
 
 col1, col2 = st.columns([1, 2])
 
-# LEFT COLUMN: Add New Tasks
+# LEFT: Task Management
 with col1:
-    st.subheader("📝 New Task")
+    st.subheader("📝 Quick Add")
     with st.form("task_form"):
         task_title = st.text_input("Task Name")
-        est_min = st.number_input("Minutes needed", min_value=15, value=60, step=15)
-        due_date = st.date_input("Due Date")
-        submitted = st.form_submit_button("Add to Memory")
-        
-        if submitted and task_title:
-            add_task(task_title, est_min, due_date)
-            st.success(f"Saved: {task_title}")
-            st.rerun() # Refresh the page to show new data immediately
+        est = st.number_input("Minutes", 15, 120, 60, step=15)
+        due = st.date_input("Due")
+        if st.form_submit_button("Add Task"):
+            add_task(task_title, est, due)
+            st.success("Added!")
+            st.rerun()
 
-# RIGHT COLUMN: See Your List
-with col2:
-    st.subheader("📋 Your To-Do List")
-    df = get_tasks()
+    st.divider()
     
-    if not df.empty:
-        # Show tasks as a nice table
-        st.dataframe(
-            df[['title', 'est_minutes', 'due_date', 'status']], 
-            use_container_width=True,
-            hide_index=True
-        )
+    # Task List for Context
+    tasks = get_tasks()
+    if not tasks.empty:
+        st.dataframe(tasks[['title', 'due_date']], hide_index=True, use_container_width=True)
+        # Prepare text for AI
+        task_context = tasks[['title', 'est_minutes', 'due_date']].to_string(index=False)
         
-        # Simple Delete Feature
-        task_list = df['id'].astype(str) + " - " + df['title']
-        task_to_delete = st.selectbox("Select task to remove:", task_list)
-        
-        if st.button("🗑️ Delete Task"):
-            # Extract the ID from the string "1 - Buy Milk" -> "1"
-            task_id = task_to_delete.split(" - ")[0]
-            delete_task(task_id)
+        # Delete button
+        task_del = st.selectbox("Remove:", tasks['id'].astype(str) + " - " + tasks['title'])
+        if st.button("Delete"):
+            delete_task(task_del.split(" - ")[0])
             st.rerun()
     else:
-        st.info("No tasks yet. Add one on the left!")
+        task_context = "No tasks currently."
+        st.info("No tasks yet.")
 
-# --- 4. DEBUG INFO ---
-st.divider()
-st.caption("System Info: Database active at 'deskbot.db'")
+# RIGHT: Chat Interface
+with col2:
+    st.subheader("💬 Chat with your Data")
+    
+    if "messages" not in st.session_state:
+        st.session_state.messages = []
+
+    # Display history
+    for msg in st.session_state.messages:
+        with st.chat_message(msg["role"]):
+            st.markdown(msg["content"])
+
+    # Chat Input
+    if prompt := st.chat_input("Ask me to plan your day..."):
+        # 1. User Message
+        with st.chat_message("user"):
+            st.markdown(prompt)
+        st.session_state.messages.append({"role": "user", "content": prompt})
+
+        # 2. AI Response
+        with st.chat_message("assistant"):
+            with st.spinner("Thinking..."):
+                # We send the prompt AND the current task list to Gemini
+                ai_reply = ask_gemini(prompt, task_context)
+                st.markdown(ai_reply)
+        st.session_state.messages.append({"role": "assistant", "content": ai_reply})

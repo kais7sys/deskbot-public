@@ -1,3 +1,4 @@
 streamlit
 pandas
 ics
+google-generativeai
