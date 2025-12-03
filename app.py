@@ -80,7 +80,7 @@ def ask_gemini(user_message, task_list_text):
 
 # --- 4. THE UI ---
 st.title("🤖 DeskBot: AI Agent")
-st.caption("Powered by Google Gemini 1.5 Flash")
+st.caption("Powered by Google Gemini pro")
 
 col1, col2 = st.columns([1, 2])
 
@@ -139,4 +139,5 @@ with col2:
                 # We send the prompt AND the current task list to Gemini
                 ai_reply = ask_gemini(prompt, task_context)
                 st.markdown(ai_reply)
+
         st.session_state.messages.append({"role": "assistant", "content": ai_reply})
