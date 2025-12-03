@@ -10,7 +10,7 @@ st.set_page_config(page_title="DeskBot: GEM PRO", page_icon="🤖", layout="wide
 # Connect to Google Gemini using your Secret Key
 if "GOOGLE_API_KEY" in st.secrets:
     genai.configure(api_key=st.secrets["GOOGLE_API_KEY"])
-    model = genai.GenerativeModel('gemini-pro')
+    model = genai.GenerativeModel('gemini-1.5-flash')
 else:
     st.error("⚠️ Google API Key missing! Please add it to Streamlit Secrets.")
 
