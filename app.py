@@ -5,7 +5,7 @@ from datetime import datetime
 import google.generativeai as genai
 
 # --- 1. SETUP & CONFIG ---
-st.set_page_config(page_title="DeskBot: AI Agent", page_icon="🤖", layout="wide")
+st.set_page_config(page_title="DeskBot: Gemini PRO", page_icon="🤖", layout="wide")
 
 # Connect to Google Gemini using your Secret Key
 if "GOOGLE_API_KEY" in st.secrets:
@@ -141,3 +141,4 @@ with col2:
                 st.markdown(ai_reply)
 
         st.session_state.messages.append({"role": "assistant", "content": ai_reply})
+
