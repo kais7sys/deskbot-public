@@ -5,6 +5,7 @@ from PyPDF2 import PdfReader
 from PIL import Image
 import time
 from supabase import create_client, Client
+from streamlit_calendar import calendar  # <--- NEW TOOL
 
 # --- 1. CONFIG ---
 st.set_page_config(page_title="DeskBot: Pro", page_icon="🧠", layout="wide")
@@ -98,7 +99,7 @@ def main_app():
             return "".join([p.extract_text() for p in reader.pages])
         except: return None
 
-    # --- CHAT & AI (WITH VISION RESTORED) ---
+    # --- CHAT ---
     def save_chat_message(role, content, task_id):
         data = {"user_id": user_id, "role": role, "content": content}
         if task_id: data["task_id"] = int(task_id)
@@ -115,17 +116,10 @@ def main_app():
 
     def ask_gemini(msg, context, image_data=None):
         try:
-            # We send a "List" to Gemini. It can contain text AND images.
             content_package = []
-            
-            # 1. Add System/Context Text
             sys_prompt = f"You are DeskBot.\nCONTEXT:\n{context}\nUSER QUESTION: {msg}"
             content_package.append(sys_prompt)
-            
-            # 2. Add Image if provided
-            if image_data:
-                content_package.append(image_data)
-                
+            if image_data: content_package.append(image_data)
             return model.generate_content(content_package).text
         except Exception as e: return f"AI Error: {e}"
 
@@ -152,8 +146,6 @@ def main_app():
         st.divider()
         if selected_task_id:
             st.subheader(f"📂 Files: {selected_task_title}")
-            
-            # Show Saved PDFs
             task_docs = get_task_documents(selected_task_id)
             if task_docs:
                 for d in task_docs:
@@ -161,36 +153,28 @@ def main_app():
                     c1.text(f"📄 {d['filename']}")
                     if c2.button("X", key=f"d{d['id']}"): delete_document(d['id']); st.rerun()
             
-            # UNIVERSAL UPLOADER (PDF + IMAGES)
             up_file = st.file_uploader("Upload File", type=["pdf", "png", "jpg", "jpeg"])
-            
-            # Global variables to hold current upload state
-            active_image = None
-            
             if up_file:
-                # CASE A: PDF (Save to DB)
                 if up_file.type == "application/pdf":
-                    if st.button("Save PDF to Notebook"):
-                        with st.spinner("Saving..."):
-                            txt = extract_pdf(up_file)
-                            if txt: save_document(up_file.name, txt, selected_task_id); st.success("Saved!"); time.sleep(1); st.rerun()
-                
-                # CASE B: IMAGE (Vision Analysis)
+                    if st.button("Save PDF"):
+                        txt = extract_pdf(up_file)
+                        if txt: save_document(up_file.name, txt, selected_task_id); st.success("Saved!"); time.sleep(1); st.rerun()
                 else:
-                    active_image = Image.open(up_file)
-                    st.image(active_image, caption="Ready for Chat", use_container_width=True)
-                    st.info("💡 You can now ask questions about this image in the chat!")
+                    st.image(Image.open(up_file), caption="Ready for Chat", use_container_width=True)
 
     st.title(f"📓 {selected_task_title}")
-    tab1, tab2 = st.tabs(["Tasks", "Chat"])
+    
+    # NEW TABS LAYOUT: Task Grid | Calendar | Chat
+    tab1, tab2, tab3 = st.tabs(["📝 Grid", "📅 Calendar", "💬 Chat"])
 
     with tab1:
         with st.expander("➕ Add Task"):
             with st.form("add"):
                 c1,c2,c3 = st.columns([3,1,1])
                 t=c1.text_input("Title"); e=c2.number_input("Min",15,120,60)
-                if c3.form_submit_button("Add"): 
-                    add_task(t,e,"2025-01-01"); st.rerun()
+                d_in = c3.date_input("Due")
+                if st.form_submit_button("Add"): 
+                    add_task(t,e,d_in); st.rerun()
         
         if not tasks_df.empty:
             edited = st.data_editor(tasks_df, key="editor", hide_index=True,
@@ -201,6 +185,37 @@ def main_app():
                 st.toast("Updated!")
 
     with tab2:
+        # --- CALENDAR VIEW ---
+        if not tasks_df.empty:
+            # 1. Convert Tasks to Calendar Events Format
+            cal_events = []
+            for i, row in tasks_df.iterrows():
+                # Color Code: Green for done, Blue for todo
+                color = "#28a745" if row['status'] == 'done' else "#3788d8"
+                
+                cal_events.append({
+                    "title": f"{row['title']} ({row['est_minutes']}m)",
+                    "start": str(row['due_date']),
+                    "end": str(row['due_date']),
+                    "backgroundColor": color,
+                    "borderColor": color
+                })
+            
+            # 2. Render Calendar
+            calendar_options = {
+                "headerToolbar": {
+                    "left": "today prev,next",
+                    "center": "title",
+                    "right": "dayGridMonth,timeGridWeek,timeGridDay"
+                },
+                "initialView": "dayGridMonth",
+            }
+            
+            calendar(events=cal_events, options=calendar_options)
+        else:
+            st.info("Add tasks to see them on the calendar!")
+
+    with tab3:
         history = get_chat_history(selected_task_id)
         for msg in history:
             with st.chat_message(msg["role"]): st.markdown(msg["content"])
@@ -209,7 +224,6 @@ def main_app():
             with st.chat_message("user"): st.markdown(p)
             save_chat_message("user", p, selected_task_id)
             
-            # Build Context
             ctx = ""
             if selected_task_id:
                 row = tasks_df[tasks_df['id']==selected_task_id].iloc[0]
@@ -217,23 +231,17 @@ def main_app():
                 docs = get_task_documents(selected_task_id)
                 for d in docs: ctx += f"FILE: {d['filename']}\nCONTENT: {d['content'][:10000]}\n"
             else: ctx = tasks_df.to_string()
+            
+            # Check for image upload in sidebar
+            img_to_send = None
+            if up_file and up_file.type != "application/pdf":
+                 img_to_send = Image.open(up_file)
 
-            # Ask AI (sending image if one is uploaded in sidebar)
             with st.chat_message("assistant"):
                 with st.spinner("Thinking..."):
-                    # We pass 'active_image' from the sidebar logic
-                    # Note: We need to access active_image from sidebar scope. 
-                    # Streamlit trick: If up_file is image, reopen it here or pass it.
-                    # Simplest way: Check the uploader again here or rely on the var
-                    
-                    img_to_send = None
-                    if up_file and up_file.type != "application/pdf":
-                         img_to_send = Image.open(up_file)
-
                     reply = ask_gemini(p, ctx, img_to_send)
                     st.markdown(reply)
             save_chat_message("assistant", reply, selected_task_id)
 
 if st.session_state.user: main_app()
 else: login_page()
-
