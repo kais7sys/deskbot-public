@@ -47,9 +47,8 @@ def main_app():
         genai.configure(api_key=st.secrets["GOOGLE_API_KEY"])
         model = genai.GenerativeModel('gemini-2.0-flash')
 
-    # --- DB FUNCTIONS ---
+    # --- DB: TASKS ---
     def get_tasks():
-        # Get all tasks for user
         res = supabase.table("tasks").select("*").eq("username", current_user).order("id").execute()
         df = pd.DataFrame(res.data)
         if not df.empty:
@@ -70,15 +69,13 @@ def main_app():
     def delete_task_in_db(tid):
         supabase.table("tasks").delete().eq("id", tid).execute()
 
-    # --- DOCS (LINKED TO TASKS) ---
+    # --- DB: DOCUMENTS ---
     def save_document(filename, content, task_id):
-        # Save file linked to a specific task
         data = {"username": current_user, "filename": filename, "content": content}
         if task_id: data["task_id"] = int(task_id)
         supabase.table("documents").insert(data).execute()
 
     def get_task_documents(task_id):
-        # Fetch docs ONLY for this task
         res = supabase.table("documents").select("id, filename, content").eq("task_id", task_id).execute()
         return res.data 
 
@@ -91,6 +88,29 @@ def main_app():
             return "".join([p.extract_text() for p in reader.pages])
         except: return None
 
+    # --- DB: CHAT HISTORY (NEW!) ---
+    def save_chat_message(role, content, task_id):
+        data = {
+            "username": current_user,
+            "role": role,
+            "content": content
+        }
+        # If we are in a specific notebook, link it. Otherwise leave task_id null (General Chat)
+        if task_id:
+            data["task_id"] = int(task_id)
+        
+        supabase.table("chat_history").insert(data).execute()
+
+    def get_chat_history(task_id):
+        # Fetch messages for THIS specific task
+        if task_id:
+            res = supabase.table("chat_history").select("*").eq("task_id", task_id).eq("username", current_user).order("created_at").execute()
+        else:
+            # Fetch "General" messages (where task_id is NULL)
+            res = supabase.table("chat_history").select("*").is_("task_id", "null").eq("username", current_user).order("created_at").execute()
+        
+        return res.data # Returns list of dicts
+
     # --- AI ---
     def ask_gemini(msg, context_text):
         try:
@@ -100,7 +120,7 @@ def main_app():
 
     # --- UI LAYOUT ---
     
-    # 1. LOAD TASKS FIRST (We need them for the dropdown)
+    # 1. LOAD TASKS
     tasks_df = get_tasks()
     
     with st.sidebar:
@@ -109,18 +129,17 @@ def main_app():
         st.divider()
 
         # --- FOCUS MODE SELECTOR ---
-        st.header("🎯 Focus Mode")
-        st.caption("Select a Task/Notebook to work on:")
+        st.header("🎯 Notebooks")
+        st.caption("Select a Task to switch Chat History:")
         
         selected_task_id = None
         selected_task_title = "General"
         
         if not tasks_df.empty:
-            # Create a dictionary { "ID - Title": ID }
             task_options = {f"{row['id']} - {row['title']}": row['id'] for i, row in tasks_df.iterrows()}
-            # Add a "General / All" option
             options_list = ["No Focus (General)"] + list(task_options.keys())
             
+            # Using session_state to track selection helps prevent reset glitches
             choice = st.selectbox("Active Notebook", options_list)
             
             if choice != "No Focus (General)":
@@ -129,11 +148,9 @@ def main_app():
         
         st.divider()
         
-        # --- TASK SPECIFIC UPLOAD ---
+        # --- FILES ---
         if selected_task_id:
-            st.subheader(f"📂 Files for '{selected_task_title}'")
-            
-            # Show existing files for THIS task
+            st.subheader(f"📂 Files: {selected_task_title}")
             task_docs = get_task_documents(selected_task_id)
             if task_docs:
                 for d in task_docs:
@@ -141,30 +158,23 @@ def main_app():
                     c1.text(f"📄 {d['filename']}")
                     if c2.button("X", key=f"del_{d['id']}"):
                         delete_document(d['id']); st.rerun()
-            else:
-                st.caption("No files yet.")
             
-            # Upload New
-            up_file = st.file_uploader("Add PDF to this Task", type=["pdf"])
-            if up_file and st.button("Attach File"):
+            up_file = st.file_uploader("Attach PDF", type=["pdf"])
+            if up_file and st.button("Upload"):
                 with st.spinner("Processing..."):
                     txt = extract_pdf(up_file)
                     if txt:
                         save_document(up_file.name, txt, selected_task_id)
-                        st.success("Attached!")
-                        time.sleep(1)
-                        st.rerun()
-        else:
-            st.info("Select a Task above to manage its specific files.")
+                        st.success("Saved!")
+                        time.sleep(1); st.rerun()
 
     # --- MAIN PAGE ---
-    st.title(f"📓 DeskBot: {selected_task_title}")
+    st.title(f"📓 {selected_task_title}")
 
     tab1, tab2 = st.tabs(["📝 Task Grid", "💬 Notebook Chat"])
 
     with tab1:
-        # TASK GRID
-        with st.expander("➕ Add New Task"):
+        with st.expander("➕ Add New Notebook/Task"):
             with st.form("add"):
                 c1,c2,c3,c4 = st.columns([3,1,1,1])
                 t=c1.text_input("Title"); e=c2.number_input("Min",15,120,60); d=c3.date_input("Due")
@@ -186,44 +196,45 @@ def main_app():
                 st.rerun()
 
     with tab2:
-        # CONTEXT AWARE CHAT
-        # If a task is selected, we gather ALL its text content
-        chat_context = ""
+        # 1. LOAD HISTORY FOR THIS SPECIFIC NOTEBOOK
+        # We fetch from DB every time the app reruns to ensure we see the right chat
+        history = get_chat_history(selected_task_id)
         
-        if selected_task_id:
-            st.success(f"🟢 Context Active: Chatting specifically about **{selected_task_title}**")
-            
-            # 1. Add Task Details to Context
-            # Find the specific task row
-            current_task_row = tasks_df[tasks_df['id'] == selected_task_id].iloc[0]
-            chat_context += f"CURRENT TASK DETAILS:\nTitle: {current_task_row['title']}\nDue: {current_task_row['due_date']}\n\n"
-            
-            # 2. Add Document Content to Context
-            docs = get_task_documents(selected_task_id)
-            if docs:
-                chat_context += "ATTACHED DOCUMENTS:\n"
-                for d in docs:
-                    chat_context += f"--- START OF {d['filename']} ---\n{d['content'][:30000]}\n--- END FILE ---\n\n" # Limit text for speed
-            else:
-                chat_context += "(No documents attached to this task yet.)"
-        else:
-            st.info("⚪ General Mode: Chatting about all tasks.")
-            chat_context = "ALL USER TASKS:\n" + tasks_df.to_string()
-
-        # Chat UI
-        if "messages" not in st.session_state: st.session_state.messages = []
-        for m in st.session_state.messages: 
-            with st.chat_message(m["role"]): st.markdown(m["content"])
-            
-        if p := st.chat_input("Ask about this task/notebook..."):
+        # Display History
+        for msg in history:
+            with st.chat_message(msg["role"]):
+                st.markdown(msg["content"])
+        
+        # 2. CHAT INPUT
+        if p := st.chat_input(f"Chat about {selected_task_title}..."):
+            # A. Display User Message Immediately
             with st.chat_message("user"): st.markdown(p)
-            st.session_state.messages.append({"role":"user", "content":p})
             
+            # B. Save User Message to DB
+            save_chat_message("user", p, selected_task_id)
+
+            # C. Build Context
+            chat_context = ""
+            if selected_task_id:
+                current_task_row = tasks_df[tasks_df['id'] == selected_task_id].iloc[0]
+                chat_context += f"TASK: {current_task_row['title']} (Due: {current_task_row['due_date']})\n"
+                docs = get_task_documents(selected_task_id)
+                if docs:
+                    for d in docs: chat_context += f"FILE: {d['filename']}\nCONTENT: {d['content'][:20000]}\n\n"
+            else:
+                chat_context = "GENERAL CONTEXT. User Tasks:\n" + tasks_df.to_string()
+
+            # D. Generate AI Response
             with st.chat_message("assistant"):
-                with st.spinner("Analyzing Notebook..."):
+                with st.spinner("Thinking..."):
                     reply = ask_gemini(p, chat_context)
                     st.markdown(reply)
-            st.session_state.messages.append({"role":"assistant", "content":reply})
+            
+            # E. Save AI Response to DB
+            save_chat_message("assistant", reply, selected_task_id)
+            
+            # F. Optional: Rerun to make sure everything is clean
+            # st.rerun() 
 
 if st.session_state.authenticated: main_app()
 else: login_page()
