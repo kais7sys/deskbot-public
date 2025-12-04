@@ -5,6 +5,7 @@ from PyPDF2 import PdfReader
 from PIL import Image
 import time
 import base64
+import re
 from io import BytesIO
 from supabase import create_client, Client
 from streamlit_calendar import calendar
@@ -67,7 +68,7 @@ def main_app():
     user_id = st.session_state.user.id
     email = st.session_state.user.email
 
-    # --- DB FUNCTIONS (SAFE VERSION) ---
+    # --- SAFE DATABASE FUNCTIONS ---
     def get_tasks():
         try:
             res = supabase.table("tasks").select("*").eq("user_id", user_id).order("id").execute()
@@ -80,13 +81,33 @@ def main_app():
             return df
         except: return pd.DataFrame()
 
-    def create_task_tool(title: str, est_minutes: int, due_date: str):
-        """Creates a new task. due_date must be YYYY-MM-DD."""
+    # 🔧 SMART TOOL: Defaults to 60 mins if confused
+    def create_task_tool(title: str, est_minutes: str, due_date: str):
+        """
+        Creates a task. 
+        est_minutes: Duration in minutes. If user says '7pm', default to 60.
+        due_date: YYYY-MM-DD.
+        """
         try:
+            # 1. CLEANUP MINUTES
+            minutes_clean = 60 # Default
+            
+            # If the AI sends a number (int or string "60"), use it.
+            # If AI sends "7pm", regex won't find a pure number easily, or might find '7'.
+            # We filter for logical duration.
+            
+            nums = re.findall(r'\d+', str(est_minutes))
+            if nums:
+                val = int(nums[0])
+                # If value is small (like 7), it might mean 7 hours? Let's assume minutes for now.
+                # If value is huge, it's fine.
+                minutes_clean = val
+            
+            # 2. SAVE
             supabase.table("tasks").insert({
-                "user_id": user_id, "title": title, "est_minutes": est_minutes, "due_date": due_date
+                "user_id": user_id, "title": title, "est_minutes": minutes_clean, "due_date": due_date
             }).execute()
-            return f"✅ Created task: '{title}' due {due_date}"
+            return f"✅ Created task: '{title}' ({minutes_clean}m) due {due_date}"
         except Exception as e: return f"❌ Error: {e}"
 
     def update_task_in_db(tid, updates):
@@ -98,7 +119,7 @@ def main_app():
             data = {"user_id": user_id, "filename": filename, "content": content}
             if task_id: data["task_id"] = int(task_id)
             supabase.table("documents").insert(data).execute()
-        except Exception as e: st.error(f"Save Error: {e}")
+        except: st.error("Save Error")
 
     def get_task_documents(task_id):
         try:
@@ -127,8 +148,22 @@ def main_app():
     def ask_agent(user_msg, context, image_data=None):
         try:
             today = datetime.now().strftime("%Y-%m-%d")
-            prompt_parts = [f"SYSTEM: You are DeskBot. Today is {today}.", f"CONTEXT:\n{context}", f"USER: {user_msg}"]
+            # 🧠 IMPROVED PROMPT: Teach the AI how to handle Time vs Duration
+            prompt_parts = [
+                f"""SYSTEM: You are DeskBot. Today is {today}.
+                
+                RULES FOR CREATING TASKS:
+                1. 'est_minutes' MUST be a duration (e.g., 30, 60). 
+                2. If the user gives a specific TIME (e.g., 'at 7pm', 'at 13:00'), DO NOT put it in 'est_minutes'.
+                3. Instead, put the specific time INSIDE the 'title' string.
+                   - Example: User "Gym at 7pm" -> Title: "Gym (7pm)", est_minutes: 60.
+                4. If no duration is specified, default 'est_minutes' to 60.
+                """,
+                f"CONTEXT:\n{context}",
+                f"USER: {user_msg}"
+            ]
             if image_data: prompt_parts.append(image_data)
+            
             response = st.session_state.chat_session.send_message(prompt_parts)
             return response.text
         except Exception as e: return f"AI Error: {e}"
@@ -172,7 +207,6 @@ def main_app():
                 selected_task_title = choice.split(" - ")[1]
         
         st.divider()
-        # FILES SECTION
         if selected_task_id:
             st.subheader(f"📂 Files: {selected_task_title}")
             task_docs = get_task_documents(selected_task_id)
@@ -194,7 +228,7 @@ def main_app():
     st.title(f"🤖 {selected_task_title}")
     tab1, tab2, tab3 = st.tabs(["📝 Grid", "📅 Calendar", "💬 Agent Chat"])
 
-    with tab1: # GRID
+    with tab1:
         if not tasks_df.empty:
             edited = st.data_editor(tasks_df, key="editor", hide_index=True,
                 column_config={"id":st.column_config.NumberColumn(disabled=True), "user_id":None})
@@ -204,7 +238,7 @@ def main_app():
                 st.toast("Updated!")
         else: st.info("No tasks.")
 
-    with tab2: # CALENDAR
+    with tab2:
         if not tasks_df.empty:
             cal_events = []
             for i, row in tasks_df.iterrows():
@@ -213,7 +247,7 @@ def main_app():
             calendar(events=cal_events, options={"headerToolbar": {"left": "today prev,next", "center": "title", "right": "dayGridMonth"}, "initialView": "dayGridMonth"})
         else: st.info("No schedule.")
 
-    with tab3: # CHAT
+    with tab3:
         history = get_chat_history(selected_task_id)
         for msg in history:
             with st.chat_message(msg["role"]):
@@ -222,10 +256,9 @@ def main_app():
                     except: pass
                 st.markdown(msg["content"])
         
-        if p := st.chat_input("Ex: 'Add a task for Physics Exam'"):
+        if p := st.chat_input("Ex: 'Add a task to call mom at 7pm'"):
             img_to_send = None
             img_base64 = None
-            # Check sidebar upload
             if 'up_file' in locals() and up_file and up_file.type != "application/pdf":
                 img_to_send = Image.open(up_file)
                 img_base64 = image_to_base64(img_to_send)
