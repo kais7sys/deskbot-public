@@ -7,7 +7,7 @@ import time
 from supabase import create_client, Client
 
 # --- 1. CONFIG ---
-st.set_page_config(page_title="DeskBot: SaaS", page_icon="🏢", layout="wide")
+st.set_page_config(page_title="DeskBot: Pro", page_icon="🧠", layout="wide")
 if "user" not in st.session_state: st.session_state.user = None
 
 # --- 2. DATABASE ---
@@ -22,9 +22,8 @@ except: st.error("⚠️ Supabase Keys missing!")
 
 # --- 3. AUTH ---
 def login_page():
-    st.title("☁️ DeskBot: Welcome")
+    st.title("☁️ DeskBot: Login")
     tab1, tab2 = st.tabs(["Log In", "Sign Up"])
-    
     with tab1:
         with st.form("login"):
             e = st.text_input("Email"); p = st.text_input("Pass", type="password")
@@ -34,7 +33,6 @@ def login_page():
                     st.session_state.user = res.user
                     st.success("Success!"); time.sleep(0.5); st.rerun()
                 except Exception as err: st.error(f"Error: {err}")
-
     with tab2:
         with st.form("signup"):
             e = st.text_input("Email"); p = st.text_input("Pass (min 6)", type="password")
@@ -42,7 +40,7 @@ def login_page():
                 try:
                     res = supabase.auth.sign_up({"email":e,"password":p})
                     st.session_state.user = res.user
-                    st.success("Account Created!"); time.sleep(0.5); st.rerun()
+                    st.success("Created!"); time.sleep(0.5); st.rerun()
                 except Exception as err: st.error(f"Error: {err}")
 
 def logout():
@@ -59,7 +57,7 @@ def main_app():
         genai.configure(api_key=st.secrets["GOOGLE_API_KEY"])
         model = genai.GenerativeModel('gemini-2.0-flash')
 
-    # --- SAFE DATABASE FUNCTIONS ---
+    # --- DB FUNCTIONS ---
     def get_tasks():
         try:
             res = supabase.table("tasks").select("*").eq("user_id", user_id).order("id").execute()
@@ -70,9 +68,7 @@ def main_app():
                 df["due_date"] = pd.to_datetime(df["due_date"]).dt.date
                 df["status"] = df["status"].astype(str)
             return df
-        except Exception as e:
-            st.error(f"DB Error (Tasks): {e}")
-            return pd.DataFrame()
+        except: return pd.DataFrame()
 
     def add_task(title, est, due):
         supabase.table("tasks").insert({
@@ -81,9 +77,6 @@ def main_app():
 
     def update_task_in_db(tid, updates):
         supabase.table("tasks").update(updates).eq("id", tid).execute()
-
-    def delete_task_in_db(tid):
-        supabase.table("tasks").delete().eq("id", tid).execute()
 
     def save_document(filename, content, task_id):
         data = {"user_id": user_id, "filename": filename, "content": content}
@@ -94,10 +87,7 @@ def main_app():
         try:
             res = supabase.table("documents").select("id, filename, content").eq("task_id", task_id).execute()
             return res.data 
-        except Exception as e:
-            # If table missing, return empty list instead of crashing
-            st.warning(f"Could not load files: {e}")
-            return []
+        except: return []
 
     def delete_document(doc_id):
         supabase.table("documents").delete().eq("id", doc_id).execute()
@@ -108,7 +98,7 @@ def main_app():
             return "".join([p.extract_text() for p in reader.pages])
         except: return None
 
-    # --- AI & CHAT ---
+    # --- CHAT & AI (WITH VISION RESTORED) ---
     def save_chat_message(role, content, task_id):
         data = {"user_id": user_id, "role": role, "content": content}
         if task_id: data["task_id"] = int(task_id)
@@ -123,10 +113,20 @@ def main_app():
             return res.data
         except: return []
 
-    def ask_gemini(msg, context):
+    def ask_gemini(msg, context, image_data=None):
         try:
-            sys = f"You are DeskBot.\nCONTEXT:\n{context}\nUSER: {msg}"
-            return model.generate_content(sys).text
+            # We send a "List" to Gemini. It can contain text AND images.
+            content_package = []
+            
+            # 1. Add System/Context Text
+            sys_prompt = f"You are DeskBot.\nCONTEXT:\n{context}\nUSER QUESTION: {msg}"
+            content_package.append(sys_prompt)
+            
+            # 2. Add Image if provided
+            if image_data:
+                content_package.append(image_data)
+                
+            return model.generate_content(content_package).text
         except Exception as e: return f"AI Error: {e}"
 
     # --- UI LAYOUT ---
@@ -152,6 +152,8 @@ def main_app():
         st.divider()
         if selected_task_id:
             st.subheader(f"📂 Files: {selected_task_title}")
+            
+            # Show Saved PDFs
             task_docs = get_task_documents(selected_task_id)
             if task_docs:
                 for d in task_docs:
@@ -159,11 +161,25 @@ def main_app():
                     c1.text(f"📄 {d['filename']}")
                     if c2.button("X", key=f"d{d['id']}"): delete_document(d['id']); st.rerun()
             
-            up_file = st.file_uploader("Upload PDF", type=["pdf"])
-            if up_file and st.button("Save"):
-                with st.spinner("Saving..."):
-                    txt = extract_pdf(up_file)
-                    if txt: save_document(up_file.name, txt, selected_task_id); st.success("Saved!"); time.sleep(1); st.rerun()
+            # UNIVERSAL UPLOADER (PDF + IMAGES)
+            up_file = st.file_uploader("Upload File", type=["pdf", "png", "jpg", "jpeg"])
+            
+            # Global variables to hold current upload state
+            active_image = None
+            
+            if up_file:
+                # CASE A: PDF (Save to DB)
+                if up_file.type == "application/pdf":
+                    if st.button("Save PDF to Notebook"):
+                        with st.spinner("Saving..."):
+                            txt = extract_pdf(up_file)
+                            if txt: save_document(up_file.name, txt, selected_task_id); st.success("Saved!"); time.sleep(1); st.rerun()
+                
+                # CASE B: IMAGE (Vision Analysis)
+                else:
+                    active_image = Image.open(up_file)
+                    st.image(active_image, caption="Ready for Chat", use_container_width=True)
+                    st.info("💡 You can now ask questions about this image in the chat!")
 
     st.title(f"📓 {selected_task_title}")
     tab1, tab2 = st.tabs(["Tasks", "Chat"])
@@ -174,8 +190,7 @@ def main_app():
                 c1,c2,c3 = st.columns([3,1,1])
                 t=c1.text_input("Title"); e=c2.number_input("Min",15,120,60)
                 if c3.form_submit_button("Add"): 
-                    add_task(t,e,"2025-01-01") # Default date for speed
-                    st.rerun()
+                    add_task(t,e,"2025-01-01"); st.rerun()
         
         if not tasks_df.empty:
             edited = st.data_editor(tasks_df, key="editor", hide_index=True,
@@ -194,6 +209,7 @@ def main_app():
             with st.chat_message("user"): st.markdown(p)
             save_chat_message("user", p, selected_task_id)
             
+            # Build Context
             ctx = ""
             if selected_task_id:
                 row = tasks_df[tasks_df['id']==selected_task_id].iloc[0]
@@ -202,9 +218,19 @@ def main_app():
                 for d in docs: ctx += f"FILE: {d['filename']}\nCONTENT: {d['content'][:10000]}\n"
             else: ctx = tasks_df.to_string()
 
+            # Ask AI (sending image if one is uploaded in sidebar)
             with st.chat_message("assistant"):
                 with st.spinner("Thinking..."):
-                    reply = ask_gemini(p, ctx)
+                    # We pass 'active_image' from the sidebar logic
+                    # Note: We need to access active_image from sidebar scope. 
+                    # Streamlit trick: If up_file is image, reopen it here or pass it.
+                    # Simplest way: Check the uploader again here or rely on the var
+                    
+                    img_to_send = None
+                    if up_file and up_file.type != "application/pdf":
+                         img_to_send = Image.open(up_file)
+
+                    reply = ask_gemini(p, ctx, img_to_send)
                     st.markdown(reply)
             save_chat_message("assistant", reply, selected_task_id)
 
