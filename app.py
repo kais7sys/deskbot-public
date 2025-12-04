@@ -8,10 +8,10 @@ import base64
 from io import BytesIO
 from supabase import create_client, Client
 from streamlit_calendar import calendar
-from datetime import datetime, timedelta
+from datetime import datetime
 
 # --- 1. CONFIG ---
-st.set_page_config(page_title="DeskBot: Agent", page_icon="🤖", layout="wide")
+st.set_page_config(page_title="DeskBot: Ultimate", page_icon="🤖", layout="wide")
 if "user" not in st.session_state: st.session_state.user = None
 
 # --- 2. DATABASE ---
@@ -31,7 +31,8 @@ def image_to_base64(image):
     return base64.b64encode(buffered.getvalue()).decode()
 
 def base64_to_image(base64_str):
-    return Image.open(BytesIO(base64.b64decode(base64_str)))
+    try: return Image.open(BytesIO(base64.b64decode(base64_str)))
+    except: return None
 
 # --- 4. AUTH ---
 def login_page():
@@ -66,7 +67,7 @@ def main_app():
     user_id = st.session_state.user.id
     email = st.session_state.user.email
 
-    # --- DB FUNCTIONS (TOOLS FOR AI) ---
+    # --- DB FUNCTIONS (SAFE VERSION) ---
     def get_tasks():
         try:
             res = supabase.table("tasks").select("*").eq("user_id", user_id).order("id").execute()
@@ -79,24 +80,25 @@ def main_app():
             return df
         except: return pd.DataFrame()
 
-    # We modify this to be "AI Friendly" (returns string)
     def create_task_tool(title: str, est_minutes: int, due_date: str):
-        """Creates a new task in the database. due_date must be YYYY-MM-DD."""
+        """Creates a new task. due_date must be YYYY-MM-DD."""
         try:
             supabase.table("tasks").insert({
                 "user_id": user_id, "title": title, "est_minutes": est_minutes, "due_date": due_date
             }).execute()
             return f"✅ Created task: '{title}' due {due_date}"
-        except Exception as e:
-            return f"❌ Failed to create task: {e}"
+        except Exception as e: return f"❌ Error: {e}"
 
     def update_task_in_db(tid, updates):
-        supabase.table("tasks").update(updates).eq("id", tid).execute()
+        try: supabase.table("tasks").update(updates).eq("id", tid).execute()
+        except: pass
 
     def save_document(filename, content, task_id):
-        data = {"user_id": user_id, "filename": filename, "content": content}
-        if task_id: data["task_id"] = int(task_id)
-        supabase.table("documents").insert(data).execute()
+        try:
+            data = {"user_id": user_id, "filename": filename, "content": content}
+            if task_id: data["task_id"] = int(task_id)
+            supabase.table("documents").insert(data).execute()
+        except Exception as e: st.error(f"Save Error: {e}")
 
     def get_task_documents(task_id):
         try:
@@ -105,7 +107,8 @@ def main_app():
         except: return []
 
     def delete_document(doc_id):
-        supabase.table("documents").delete().eq("id", doc_id).execute()
+        try: supabase.table("documents").delete().eq("id", doc_id).execute()
+        except: pass
 
     def extract_pdf(file):
         try:
@@ -113,51 +116,31 @@ def main_app():
             return "".join([p.extract_text() for p in reader.pages])
         except: return None
 
-    # --- AI SETUP (WITH TOOLS) ---
+    # --- AI SETUP ---
     if "GOOGLE_API_KEY" in st.secrets:
         genai.configure(api_key=st.secrets["GOOGLE_API_KEY"])
-        
-        # 1. Define the Toolbox
         my_tools = [create_task_tool]
-        
-        # 2. Configure Model with Tools
-        model = genai.GenerativeModel(
-            'gemini-2.0-flash',
-            tools=my_tools
-        )
-        
-        # 3. Start a Chat Session (Important for Tools)
-        # We store the chat object in session state so it remembers tool use
+        model = genai.GenerativeModel('gemini-2.0-flash', tools=my_tools)
         if "chat_session" not in st.session_state:
             st.session_state.chat_session = model.start_chat(enable_automatic_function_calling=True)
 
     def ask_agent(user_msg, context, image_data=None):
         try:
-            # We inject the "Today's Date" so the AI knows what 'next Friday' means
             today = datetime.now().strftime("%Y-%m-%d")
-            
-            # Construct Prompt
-            prompt_parts = [
-                f"SYSTEM: You are DeskBot, an autonomous agent. Today is {today}.",
-                f"CONTEXT from DB:\n{context}",
-                f"USER: {user_msg}"
-            ]
-            
-            if image_data:
-                prompt_parts.append(image_data)
-
-            # Send to Gemini (It will automatically run the tool if needed!)
+            prompt_parts = [f"SYSTEM: You are DeskBot. Today is {today}.", f"CONTEXT:\n{context}", f"USER: {user_msg}"]
+            if image_data: prompt_parts.append(image_data)
             response = st.session_state.chat_session.send_message(prompt_parts)
             return response.text
-        except Exception as e:
-            return f"AI Error: {e}"
+        except Exception as e: return f"AI Error: {e}"
 
-    # --- CHAT & HISTORY ---
+    # --- CHAT HISTORY ---
     def save_chat_message(role, content, task_id, image_data=None):
-        data = {"user_id": user_id, "role": role, "content": content}
-        if task_id: data["task_id"] = int(task_id)
-        if image_data: data["image_data"] = image_data
-        supabase.table("chat_history").insert(data).execute()
+        try:
+            data = {"user_id": user_id, "role": role, "content": content}
+            if task_id: data["task_id"] = int(task_id)
+            if image_data: data["image_data"] = image_data
+            supabase.table("chat_history").insert(data).execute()
+        except: pass
 
     def get_chat_history(task_id):
         try:
@@ -189,6 +172,7 @@ def main_app():
                 selected_task_title = choice.split(" - ")[1]
         
         st.divider()
+        # FILES SECTION
         if selected_task_id:
             st.subheader(f"📂 Files: {selected_task_title}")
             task_docs = get_task_documents(selected_task_id)
@@ -199,15 +183,18 @@ def main_app():
                     if c2.button("X", key=f"d{d['id']}"): delete_document(d['id']); st.rerun()
             
             up_file = st.file_uploader("Upload File", type=["pdf", "png", "jpg", "jpeg"])
-            if up_file and up_file.type == "application/pdf":
-                if st.button("Save PDF"):
-                    txt = extract_pdf(up_file)
-                    if txt: save_document(up_file.name, txt, selected_task_id); st.success("Saved!"); time.sleep(1); st.rerun()
+            if up_file:
+                if up_file.type == "application/pdf":
+                    if st.button("Save PDF"):
+                        txt = extract_pdf(up_file)
+                        if txt: save_document(up_file.name, txt, selected_task_id); st.success("Saved!"); time.sleep(1); st.rerun()
+                else:
+                    st.image(Image.open(up_file), caption="Ready", width=200)
 
     st.title(f"🤖 {selected_task_title}")
     tab1, tab2, tab3 = st.tabs(["📝 Grid", "📅 Calendar", "💬 Agent Chat"])
 
-    with tab1:
+    with tab1: # GRID
         if not tasks_df.empty:
             edited = st.data_editor(tasks_df, key="editor", hide_index=True,
                 column_config={"id":st.column_config.NumberColumn(disabled=True), "user_id":None})
@@ -215,22 +202,18 @@ def main_app():
                 for idx, updates in st.session_state["editor"]["edited_rows"].items():
                     update_task_in_db(tasks_df.iloc[idx]["id"], updates)
                 st.toast("Updated!")
-        else: st.info("No tasks. Tell the chat to create one!")
+        else: st.info("No tasks.")
 
-    with tab2:
+    with tab2: # CALENDAR
         if not tasks_df.empty:
             cal_events = []
             for i, row in tasks_df.iterrows():
                 color = "#28a745" if row['status'] == 'done' else "#3788d8"
-                cal_events.append({
-                    "title": f"{row['title']} ({row['est_minutes']}m)",
-                    "start": str(row['due_date']), "end": str(row['due_date']),
-                    "backgroundColor": color, "borderColor": color
-                })
+                cal_events.append({"title": f"{row['title']} ({row['est_minutes']}m)", "start": str(row['due_date']), "end": str(row['due_date']), "backgroundColor": color, "borderColor": color})
             calendar(events=cal_events, options={"headerToolbar": {"left": "today prev,next", "center": "title", "right": "dayGridMonth"}, "initialView": "dayGridMonth"})
-        else: st.info("Chat with the bot to schedule things!")
+        else: st.info("No schedule.")
 
-    with tab3:
+    with tab3: # CHAT
         history = get_chat_history(selected_task_id)
         for msg in history:
             with st.chat_message(msg["role"]):
@@ -239,9 +222,10 @@ def main_app():
                     except: pass
                 st.markdown(msg["content"])
         
-        if p := st.chat_input("Ex: 'Add a task to call mom on Friday'"):
+        if p := st.chat_input("Ex: 'Add a task for Physics Exam'"):
             img_to_send = None
             img_base64 = None
+            # Check sidebar upload
             if 'up_file' in locals() and up_file and up_file.type != "application/pdf":
                 img_to_send = Image.open(up_file)
                 img_base64 = image_to_base64(img_to_send)
@@ -251,22 +235,18 @@ def main_app():
                 st.markdown(p)
             save_chat_message("user", p, selected_task_id, img_base64)
             
-            ctx = tasks_df.to_string() if not tasks_df.empty else "No tasks yet."
+            ctx = tasks_df.to_string() if not tasks_df.empty else "No tasks."
+            if selected_task_id:
+                docs = get_task_documents(selected_task_id)
+                for d in docs: ctx += f"\nFILE: {d['filename']}\nCONTENT: {d['content'][:10000]}"
 
             with st.chat_message("assistant"):
-                with st.spinner("Agent is working..."):
-                    # THIS IS WHERE THE MAGIC HAPPENS
-                    # The Agent will DECIDE if it needs to call create_task_tool
+                with st.spinner("Agent working..."):
                     reply = ask_agent(p, ctx, img_to_send)
                     st.markdown(reply)
             
             save_chat_message("assistant", reply, selected_task_id)
-            
-            # If the agent created a task, we need to refresh to see it in the grid/calendar
-            if "Created task" in reply:
-                time.sleep(1)
-                st.rerun()
+            if "Created task" in reply: time.sleep(1); st.rerun()
 
 if st.session_state.user: main_app()
 else: login_page()
-
