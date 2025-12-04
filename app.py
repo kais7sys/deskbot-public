@@ -1,22 +1,36 @@
 import streamlit as st
-import sqlite3
 import pandas as pd
 import google.generativeai as genai
 from PyPDF2 import PdfReader
 from PIL import Image
 import time
+from supabase import create_client, Client
 
 # --- 1. CONFIG & STATE ---
-st.set_page_config(page_title="DeskBot: Secure Workspace", page_icon="🔐", layout="wide")
+st.set_page_config(page_title="DeskBot: Cloud Platform", page_icon="☁️", layout="wide")
 
-# Initialize Session State for Login
+# Initialize Session State
 if "authenticated" not in st.session_state:
     st.session_state.authenticated = False
+if "username" not in st.session_state:
+    st.session_state.username = None
 
-# --- 2. AUTHENTICATION FUNCTIONS ---
+# --- 2. DATABASE CONNECTION (SUPABASE) ---
+# Initialize the connection once
+@st.cache_resource
+def init_supabase():
+    url = st.secrets["SUPABASE_URL"]
+    key = st.secrets["SUPABASE_KEY"]
+    return create_client(url, key)
+
+try:
+    supabase = init_supabase()
+except:
+    st.error("⚠️ Supabase Keys missing in Streamlit Secrets!")
+
+# --- 3. AUTHENTICATION ---
 def check_login(username, password):
-    """Simple check. In real life, this checks a database."""
-    # DEMO CREDENTIALS:
+    # Mock Database of Users
     if username == "kais" and password == "deskbot123":
         return True
     elif username == "admin" and password == "admin":
@@ -25,84 +39,65 @@ def check_login(username, password):
         return False
 
 def login_page():
-    """The Front Door"""
-    st.title("🔐 Sign In to DeskBot")
-    st.write("Welcome to your AI Productivity Workspace.")
+    st.title("☁️ DeskBot Cloud Login")
+    st.write("Sign in to access your persistent workspace.")
     
     col1, col2 = st.columns([1, 2])
     with col1:
         with st.form("login_form"):
             user = st.text_input("Username")
-            # type="password" hides the text with dots
             passw = st.text_input("Password", type="password")
             submitted = st.form_submit_button("Log In")
             
             if submitted:
                 if check_login(user, passw):
                     st.session_state.authenticated = True
-                    st.success("Access Granted!")
+                    st.session_state.username = user # Remember WHO is logged in
+                    st.success(f"Welcome back, {user}!")
                     time.sleep(1)
-                    st.rerun() # Reloads the app to show the Main App
+                    st.rerun()
                 else:
-                    st.error("Incorrect username or password")
+                    st.error("Invalid credentials.")
     
     with col2:
-        st.info("ℹ️ **Demo Access:**\n\nUsername: `kais`\nPassword: `deskbot123`")
+        st.info("ℹ️ **Demo Accounts:**\n\nUser: `kais` | Pass: `deskbot123`")
 
 def logout():
     st.session_state.authenticated = False
+    st.session_state.username = None
     st.rerun()
 
-# --- 3. THE MAIN APP (Your Previous Code) ---
+# --- 4. MAIN APPLICATION ---
 def main_app():
-    # --- SETUP ---
-    # Connect to Google Gemini
+    # Helper: Get Current User's Name
+    current_user = st.session_state.username
+
+    # Connect to AI
     if "GOOGLE_API_KEY" in st.secrets:
         genai.configure(api_key=st.secrets["GOOGLE_API_KEY"])
         model = genai.GenerativeModel('gemini-2.0-flash')
-    else:
-        st.error("⚠️ Google API Key missing!")
 
-    # Database Setup
-    def init_db():
-        conn = sqlite3.connect("deskbot.db")
-        c = conn.cursor()
-        c.execute('''CREATE TABLE IF NOT EXISTS tasks (
-                        id INTEGER PRIMARY KEY AUTOINCREMENT,
-                        title TEXT,
-                        est_minutes INTEGER,
-                        due_date TEXT,
-                        status TEXT DEFAULT 'todo'
-                    )''')
-        conn.commit()
-        conn.close()
-    init_db()
-
-    # Helpers
+    # --- DATABASE FUNCTIONS (SUPABASE EDITION) ---
     def get_tasks():
-        conn = sqlite3.connect("deskbot.db")
-        try:
-            df = pd.read_sql("SELECT * FROM tasks", conn)
-        except:
-            df = pd.DataFrame()
-        conn.close()
+        # Select * FROM tasks WHERE username = current_user
+        response = supabase.table("tasks").select("*").eq("username", current_user).execute()
+        df = pd.DataFrame(response.data)
         return df
 
     def add_task(title, est, due):
-        conn = sqlite3.connect("deskbot.db")
-        c = conn.cursor()
-        c.execute("INSERT INTO tasks (title, est_minutes, due_date) VALUES (?, ?, ?)", 
-                (title, est, str(due)))
-        conn.commit()
-        conn.close()
+        # Insert new row with username
+        data = {
+            "username": current_user,
+            "title": title,
+            "est_minutes": est,
+            "due_date": str(due),
+            "status": "todo"
+        }
+        supabase.table("tasks").insert(data).execute()
 
     def delete_task(task_id):
-        conn = sqlite3.connect("deskbot.db")
-        c = conn.cursor()
-        c.execute("DELETE FROM tasks WHERE id=?", (task_id,))
-        conn.commit()
-        conn.close()
-    
+        supabase.table("tasks").delete().eq("id", task_id).execute()
+
     def extract_text_from_pdf(uploaded_file):
         try:
             pdf_reader = PdfReader(uploaded_file)
@@ -119,7 +114,6 @@ def main_app():
             You are DeskBot.
             CONTEXT: User's Tasks: {task_list_text}
             USER MESSAGE: "{user_message}"
-            INSTRUCTIONS: Analyze images or text provided. Help plan tasks.
             """
             content_package = [system_instruction]
             if file_type == "image":
@@ -132,80 +126,79 @@ def main_app():
             return f"⚠️ AI Error: {e}"
 
     # --- UI LAYOUT ---
-    
-    # Sidebar with LOGOUT
     with st.sidebar:
-        st.header("👤 User: Kais")
+        st.header(f"👤 {current_user.upper()}")
         if st.button("Log Out"):
             logout()
-            
         st.divider()
-        st.header("📂 Upload")
-        uploaded_file = st.file_uploader("Drop a File (PDF, PNG, JPG)", type=["pdf", "png", "jpg", "jpeg"])
+        st.header("📂 Vision Upload")
+        uploaded_file = st.file_uploader("File (PDF/Image)", type=["pdf", "png", "jpg"])
         
         file_payload = None
         file_type = None
-
-        if uploaded_file is not None:
+        if uploaded_file:
             if uploaded_file.type == "application/pdf":
                 file_type = "pdf"
-                with st.spinner("Reading PDF..."):
-                    file_payload = extract_text_from_pdf(uploaded_file)
-                st.success("PDF Loaded!")
+                file_payload = extract_text_from_pdf(uploaded_file)
+                st.success("PDF Ready")
             else:
                 file_type = "image"
                 file_payload = Image.open(uploaded_file)
-                st.image(file_payload, caption="Uploaded Image", use_container_width=True)
-                st.success("Image Loaded!")
+                st.image(file_payload, width=200)
+                st.success("Image Ready")
 
-    st.title("🤖 DeskBot Workspace")
+    st.title("☁️ DeskBot Platform")
+    
     col1, col2 = st.columns([1, 2])
 
     with col1:
-        st.subheader("📝 Quick Add")
+        st.subheader("📝 Cloud Tasks")
         with st.form("task_form"):
-            task_title = st.text_input("Task Name")
-            est = st.number_input("Minutes", 15, 120, 60, step=15)
-            due = st.date_input("Due")
-            if st.form_submit_button("Add Task"):
-                add_task(task_title, est, due)
-                st.success("Added!")
+            t_title = st.text_input("Task")
+            t_est = st.number_input("Mins", 15, 120, 60, step=15)
+            t_due = st.date_input("Due")
+            if st.form_submit_button("Add to Cloud"):
+                add_task(t_title, t_est, t_due)
+                st.success("Saved to Supabase!")
                 st.rerun()
 
         st.divider()
-        tasks = get_tasks()
-        if not tasks.empty:
-            st.dataframe(tasks[['title', 'due_date']], hide_index=True, use_container_width=True)
-            task_context = tasks[['title', 'est_minutes', 'due_date']].to_string(index=False)
-            task_del = st.selectbox("Remove:", tasks['id'].astype(str) + " - " + tasks['title'])
-            if st.button("Delete"):
-                delete_task(task_del.split(" - ")[0])
+        df = get_tasks()
+        if not df.empty:
+            st.dataframe(df[['title', 'due_date', 'status']], hide_index=True)
+            task_context = df.to_string()
+            
+            # Delete Logic
+            t_del = st.selectbox("Delete:", df['id'].astype(str) + " - " + df['title'])
+            if st.button("Delete Task"):
+                delete_task(t_del.split(" - ")[0])
                 st.rerun()
         else:
-            task_context = "No tasks currently."
-            st.info("No tasks yet.")
+            task_context = "No tasks."
+            st.info("No tasks in cloud yet.")
 
     with col2:
-        st.subheader("💬 Chat")
+        st.subheader("💬 AI Assistant")
         if "messages" not in st.session_state:
             st.session_state.messages = []
+        
         for msg in st.session_state.messages:
             with st.chat_message(msg["role"]):
                 st.markdown(msg["content"])
-        if prompt := st.chat_input("Ask about the uploaded file..."):
+        
+        if prompt := st.chat_input("Ask DeskBot..."):
             with st.chat_message("user"):
                 st.markdown(prompt)
             st.session_state.messages.append({"role": "user", "content": prompt})
+            
             with st.chat_message("assistant"):
                 with st.spinner("Thinking..."):
-                    ai_reply = ask_gemini(prompt, task_context, file_payload, file_type)
-                    st.markdown(ai_reply)
-            st.session_state.messages.append({"role": "assistant", "content": ai_reply})
+                    reply = ask_gemini(prompt, task_context, file_payload, file_type)
+                    st.markdown(reply)
+            st.session_state.messages.append({"role": "assistant", "content": reply})
 
-# --- 4. FLOW CONTROL ---
-# This is the "Traffic Cop" that decides which page to show
+# --- 5. TRAFFIC CONTROL ---
 if st.session_state.authenticated:
     main_app()
 else:
     login_page()
-
