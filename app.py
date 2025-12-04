@@ -8,9 +8,10 @@ import base64
 from io import BytesIO
 from supabase import create_client, Client
 from streamlit_calendar import calendar
+from datetime import datetime, timedelta
 
 # --- 1. CONFIG ---
-st.set_page_config(page_title="DeskBot: Pro", page_icon="🧠", layout="wide")
+st.set_page_config(page_title="DeskBot: Agent", page_icon="🤖", layout="wide")
 if "user" not in st.session_state: st.session_state.user = None
 
 # --- 2. DATABASE ---
@@ -23,15 +24,13 @@ def init_supabase():
 try: supabase = init_supabase()
 except: st.error("⚠️ Supabase Keys missing!")
 
-# --- 3. HELPER FUNCTIONS (IMAGE HANDLING) ---
+# --- 3. HELPER FUNCTIONS ---
 def image_to_base64(image):
-    """Converts a PIL Image to a string we can save in the database."""
     buffered = BytesIO()
     image.save(buffered, format="PNG")
     return base64.b64encode(buffered.getvalue()).decode()
 
 def base64_to_image(base64_str):
-    """Converts the database string back to an image."""
     return Image.open(BytesIO(base64.b64decode(base64_str)))
 
 # --- 4. AUTH ---
@@ -67,11 +66,7 @@ def main_app():
     user_id = st.session_state.user.id
     email = st.session_state.user.email
 
-    if "GOOGLE_API_KEY" in st.secrets:
-        genai.configure(api_key=st.secrets["GOOGLE_API_KEY"])
-        model = genai.GenerativeModel('gemini-2.0-flash')
-
-    # --- DB FUNCTIONS ---
+    # --- DB FUNCTIONS (TOOLS FOR AI) ---
     def get_tasks():
         try:
             res = supabase.table("tasks").select("*").eq("user_id", user_id).order("id").execute()
@@ -84,10 +79,16 @@ def main_app():
             return df
         except: return pd.DataFrame()
 
-    def add_task(title, est, due):
-        supabase.table("tasks").insert({
-            "user_id": user_id, "title": title, "est_minutes": est, "due_date": str(due)
-        }).execute()
+    # We modify this to be "AI Friendly" (returns string)
+    def create_task_tool(title: str, est_minutes: int, due_date: str):
+        """Creates a new task in the database. due_date must be YYYY-MM-DD."""
+        try:
+            supabase.table("tasks").insert({
+                "user_id": user_id, "title": title, "est_minutes": est_minutes, "due_date": due_date
+            }).execute()
+            return f"✅ Created task: '{title}' due {due_date}"
+        except Exception as e:
+            return f"❌ Failed to create task: {e}"
 
     def update_task_in_db(tid, updates):
         supabase.table("tasks").update(updates).eq("id", tid).execute()
@@ -112,12 +113,50 @@ def main_app():
             return "".join([p.extract_text() for p in reader.pages])
         except: return None
 
-    # --- CHAT & HISTORY (UPDATED WITH IMAGES) ---
+    # --- AI SETUP (WITH TOOLS) ---
+    if "GOOGLE_API_KEY" in st.secrets:
+        genai.configure(api_key=st.secrets["GOOGLE_API_KEY"])
+        
+        # 1. Define the Toolbox
+        my_tools = [create_task_tool]
+        
+        # 2. Configure Model with Tools
+        model = genai.GenerativeModel(
+            'gemini-2.0-flash',
+            tools=my_tools
+        )
+        
+        # 3. Start a Chat Session (Important for Tools)
+        # We store the chat object in session state so it remembers tool use
+        if "chat_session" not in st.session_state:
+            st.session_state.chat_session = model.start_chat(enable_automatic_function_calling=True)
+
+    def ask_agent(user_msg, context, image_data=None):
+        try:
+            # We inject the "Today's Date" so the AI knows what 'next Friday' means
+            today = datetime.now().strftime("%Y-%m-%d")
+            
+            # Construct Prompt
+            prompt_parts = [
+                f"SYSTEM: You are DeskBot, an autonomous agent. Today is {today}.",
+                f"CONTEXT from DB:\n{context}",
+                f"USER: {user_msg}"
+            ]
+            
+            if image_data:
+                prompt_parts.append(image_data)
+
+            # Send to Gemini (It will automatically run the tool if needed!)
+            response = st.session_state.chat_session.send_message(prompt_parts)
+            return response.text
+        except Exception as e:
+            return f"AI Error: {e}"
+
+    # --- CHAT & HISTORY ---
     def save_chat_message(role, content, task_id, image_data=None):
         data = {"user_id": user_id, "role": role, "content": content}
         if task_id: data["task_id"] = int(task_id)
-        if image_data: data["image_data"] = image_data  # <--- SAVE IMAGE CODE
-        
+        if image_data: data["image_data"] = image_data
         supabase.table("chat_history").insert(data).execute()
 
     def get_chat_history(task_id):
@@ -128,15 +167,6 @@ def main_app():
                 res = supabase.table("chat_history").select("*").is_("task_id", "null").eq("user_id", user_id).order("created_at").execute()
             return res.data
         except: return []
-
-    def ask_gemini(msg, context, image_data=None):
-        try:
-            content_package = []
-            sys_prompt = f"You are DeskBot.\nCONTEXT:\n{context}\nUSER QUESTION: {msg}"
-            content_package.append(sys_prompt)
-            if image_data: content_package.append(image_data)
-            return model.generate_content(content_package).text
-        except Exception as e: return f"AI Error: {e}"
 
     # --- UI LAYOUT ---
     tasks_df = get_tasks()
@@ -168,29 +198,16 @@ def main_app():
                     c1.text(f"📄 {d['filename']}")
                     if c2.button("X", key=f"d{d['id']}"): delete_document(d['id']); st.rerun()
             
-            # FILE UPLOADER
             up_file = st.file_uploader("Upload File", type=["pdf", "png", "jpg", "jpeg"])
-            
-            # If PDF, show Save Button
             if up_file and up_file.type == "application/pdf":
                 if st.button("Save PDF"):
                     txt = extract_pdf(up_file)
                     if txt: save_document(up_file.name, txt, selected_task_id); st.success("Saved!"); time.sleep(1); st.rerun()
 
-    st.title(f"📓 {selected_task_title}")
-    
-    # TABS
-    tab1, tab2, tab3 = st.tabs(["📝 Grid", "📅 Calendar", "💬 Chat"])
+    st.title(f"🤖 {selected_task_title}")
+    tab1, tab2, tab3 = st.tabs(["📝 Grid", "📅 Calendar", "💬 Agent Chat"])
 
     with tab1:
-        with st.expander("➕ Add Task"):
-            with st.form("add"):
-                c1,c2,c3 = st.columns([3,1,1])
-                t=c1.text_input("Title"); e=c2.number_input("Min",15,120,60)
-                d_in = c3.date_input("Due")
-                if st.form_submit_button("Add"): 
-                    add_task(t,e,d_in); st.rerun()
-        
         if not tasks_df.empty:
             edited = st.data_editor(tasks_df, key="editor", hide_index=True,
                 column_config={"id":st.column_config.NumberColumn(disabled=True), "user_id":None})
@@ -198,6 +215,7 @@ def main_app():
                 for idx, updates in st.session_state["editor"]["edited_rows"].items():
                     update_task_in_db(tasks_df.iloc[idx]["id"], updates)
                 st.toast("Updated!")
+        else: st.info("No tasks. Tell the chat to create one!")
 
     with tab2:
         if not tasks_df.empty:
@@ -210,67 +228,45 @@ def main_app():
                     "backgroundColor": color, "borderColor": color
                 })
             calendar(events=cal_events, options={"headerToolbar": {"left": "today prev,next", "center": "title", "right": "dayGridMonth"}, "initialView": "dayGridMonth"})
-        else: st.info("Add tasks to see Calendar.")
+        else: st.info("Chat with the bot to schedule things!")
 
     with tab3:
-        # 1. RENDER HISTORY (With Images!)
         history = get_chat_history(selected_task_id)
         for msg in history:
             with st.chat_message(msg["role"]):
-                # CHECK IF MESSAGE HAS AN IMAGE
                 if msg.get("image_data"):
-                    try:
-                        # Decode and display the saved image
-                        img = base64_to_image(msg["image_data"])
-                        st.image(img, width=300)
-                    except:
-                        st.error("Error loading image")
-                
-                # Display Text
+                    try: st.image(base64_to_image(msg["image_data"]), width=300)
+                    except: pass
                 st.markdown(msg["content"])
         
-        # 2. CHAT INPUT
-        if p := st.chat_input("Chat..."):
-            # CHECK FOR IMAGE UPLOAD IN SIDEBAR
+        if p := st.chat_input("Ex: 'Add a task to call mom on Friday'"):
             img_to_send = None
             img_base64 = None
-            
-            # If user uploaded an image in sidebar, we include it in this message
-            if up_file and up_file.type != "application/pdf":
+            if 'up_file' in locals() and up_file and up_file.type != "application/pdf":
                 img_to_send = Image.open(up_file)
-                # Convert to base64 to save in DB
                 img_base64 = image_to_base64(img_to_send)
 
-            # A. Display User Message Immediately
             with st.chat_message("user"):
                 if img_to_send: st.image(img_to_send, width=300)
                 st.markdown(p)
-            
-            # B. Save User Message (Text + Image Code)
             save_chat_message("user", p, selected_task_id, img_base64)
             
-            # C. Build Context
-            ctx = ""
-            if selected_task_id:
-                row = tasks_df[tasks_df['id']==selected_task_id].iloc[0]
-                ctx += f"TASK: {row['title']}\n"
-                docs = get_task_documents(selected_task_id)
-                for d in docs: ctx += f"FILE: {d['filename']}\nCONTENT: {d['content'][:10000]}\n"
-            else: ctx = tasks_df.to_string()
+            ctx = tasks_df.to_string() if not tasks_df.empty else "No tasks yet."
 
-            # D. Ask AI
             with st.chat_message("assistant"):
-                with st.spinner("Thinking..."):
-                    reply = ask_gemini(p, ctx, img_to_send)
+                with st.spinner("Agent is working..."):
+                    # THIS IS WHERE THE MAGIC HAPPENS
+                    # The Agent will DECIDE if it needs to call create_task_tool
+                    reply = ask_agent(p, ctx, img_to_send)
                     st.markdown(reply)
             
-            # E. Save AI Response
             save_chat_message("assistant", reply, selected_task_id)
             
-            # F. Clear the uploader by rerunning (optional, keeps UI clean)
-            if img_to_send:
+            # If the agent created a task, we need to refresh to see it in the grid/calendar
+            if "Created task" in reply:
                 time.sleep(1)
                 st.rerun()
 
 if st.session_state.user: main_app()
 else: login_page()
+
