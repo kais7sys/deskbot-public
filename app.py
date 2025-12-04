@@ -5,7 +5,6 @@ from PyPDF2 import PdfReader
 from PIL import Image
 import time
 import base64
-import re
 from io import BytesIO
 from supabase import create_client, Client
 from streamlit_calendar import calendar
@@ -14,12 +13,10 @@ from datetime import datetime, date
 # --- 1. CONFIG & STYLE (NOTION LOOK) ---
 st.set_page_config(page_title="DeskBot", page_icon="📓", layout="wide")
 
-# Custom CSS to clean up the UI (Notion-style minimal headers)
+# Custom CSS for clean UI
 st.markdown("""
 <style>
     .block-container {padding-top: 1rem; padding-bottom: 5rem;}
-    #MainMenu {visibility: hidden;}
-    footer {visibility: hidden;}
     header {visibility: hidden;}
     [data-testid="stSidebar"] {background-color: #f7f9fb;}
     .stTabs [data-baseweb="tab-list"] {gap: 24px;}
@@ -30,7 +27,7 @@ st.markdown("""
 
 if "user" not in st.session_state: st.session_state.user = None
 
-# --- 2. DATABASE CONNECTION ---
+# --- 2. DATABASE ---
 @st.cache_resource
 def init_supabase():
     url = st.secrets["SUPABASE_URL"]
@@ -40,7 +37,7 @@ def init_supabase():
 try: supabase = init_supabase()
 except: st.error("⚠️ Supabase Keys missing!")
 
-# --- 3. HELPER FUNCTIONS ---
+# --- 3. HELPERS ---
 def image_to_base64(image):
     buffered = BytesIO()
     image.save(buffered, format="PNG")
@@ -50,7 +47,7 @@ def base64_to_image(base64_str):
     try: return Image.open(BytesIO(base64.b64decode(base64_str)))
     except: return None
 
-# --- 4. AUTHENTICATION ---
+# --- 4. AUTH ---
 def login_page():
     c1, c2, c3 = st.columns([1,2,1])
     with c2:
@@ -72,7 +69,7 @@ def login_page():
                     try:
                         res = supabase.auth.sign_up({"email":e,"password":p})
                         st.session_state.user = res.user
-                        st.success("Account created! You can now log in."); time.sleep(1); st.rerun()
+                        st.success("Account created!"); time.sleep(1); st.rerun()
                     except Exception as err: st.error(f"Error: {err}")
 
 def logout():
@@ -81,7 +78,7 @@ def logout():
     st.session_state.chat_session = None
     st.rerun()
 
-# --- 5. MAIN APPLICATION ---
+# --- 5. MAIN APP ---
 def main_app():
     user_id = st.session_state.user.id
     email = st.session_state.user.email
@@ -94,14 +91,13 @@ def main_app():
             if not df.empty:
                 df["id"] = df["id"].astype(int)
                 df["est_minutes"] = df["est_minutes"].astype(int)
-                # Ensure date is string YYYY-MM-DD for Calendar
-                df["due_date"] = pd.to_datetime(df["due_date"]).dt.strftime('%Y-%m-%d')
+                # FIX: Keep it as a Date Object for the Editor
+                df["due_date"] = pd.to_datetime(df["due_date"]).dt.date
                 df["status"] = df["status"].astype(str)
             return df
         except: return pd.DataFrame()
 
     def add_task_to_scheduler(task_title: str, duration_minutes: int, due_date: str):
-        """Adds a task. task_title (str), duration_minutes (int), due_date (YYYY-MM-DD)."""
         try:
             if not isinstance(duration_minutes, int): duration_minutes = 60
             supabase.table("tasks").insert({
@@ -180,22 +176,18 @@ def main_app():
         except: return []
 
     # ==========================
-    # UI LAYOUT (NOTION STYLE)
+    # UI LAYOUT
     # ==========================
-    
     tasks_df = get_tasks()
 
-    # --- SIDEBAR: SOURCES & NOTEBOOKS ---
+    # --- SIDEBAR ---
     with st.sidebar:
         st.write(f"**{email}**")
-        
         st.subheader("📚 Notebooks")
         selected_task_id = None
         selected_task_title = "General Chat"
         
-        # Notebook Selector
         if not tasks_df.empty:
-            # Get unique list of tasks to act as "Notebooks"
             task_options = {f"{row['title']}": row['id'] for i, row in tasks_df.iterrows()}
             options_list = ["General Chat"] + list(task_options.keys())
             choice = st.selectbox("Select Notebook", options_list, label_visibility="collapsed")
@@ -204,8 +196,6 @@ def main_app():
                 selected_task_title = choice
         
         st.divider()
-        
-        # FILE SOURCES (NotebookLLM Style)
         st.subheader("📂 Sources")
         if selected_task_id:
             task_docs = get_task_documents(selected_task_id)
@@ -215,66 +205,50 @@ def main_app():
                     c1.caption(f"📄 {d['filename']}")
                     if c2.button("x", key=f"d{d['id']}"): delete_document(d['id']); st.rerun()
             else:
-                st.caption("No sources attached.")
+                st.caption("No sources.")
             
-            # UPLOAD NEW SOURCE
             with st.expander("Add Source (+)", expanded=False):
-                up_file = st.file_uploader("Upload PDF/Image", type=["pdf", "png", "jpg", "jpeg"], label_visibility="collapsed")
+                up_file = st.file_uploader("Upload", type=["pdf", "png", "jpg", "jpeg"], label_visibility="collapsed")
                 if up_file:
                     if up_file.type == "application/pdf":
-                        if st.button("Save PDF to Notebook", use_container_width=True):
+                        if st.button("Save PDF", use_container_width=True):
                             txt = extract_pdf(up_file)
                             if txt: save_document(up_file.name, txt, selected_task_id); st.success("Saved!"); time.sleep(1); st.rerun()
                     else:
                         st.image(Image.open(up_file), caption="Preview", width=150)
         else:
-            st.caption("Select a specific notebook above to add sources.")
+            st.caption("Select a notebook to add files.")
 
         st.divider()
         if st.button("Log Out"): logout()
 
-    # --- MAIN PAGE ---
+    # --- MAIN TABS ---
     st.title(f"{selected_task_title}")
-    
-    # TABS: Chat (Primary) vs Plan (Secondary)
     tab_chat, tab_plan = st.tabs(["💬 Chat", "🗓️ Plan & Calendar"])
 
-    # === TAB 1: CHAT INTERFACE ===
+    # === CHAT ===
     with tab_chat:
-        # Chat History Container
         history_container = st.container()
-        
-        # Input Area (Bottom)
-        if p := st.chat_input("Ask DeskBot or add a task..."):
-            img_to_send = None
-            img_base64 = None
+        if p := st.chat_input("Ask DeskBot..."):
+            img_to_send = None; img_base64 = None
             if 'up_file' in locals() and up_file and up_file.type != "application/pdf":
-                img_to_send = Image.open(up_file)
-                img_base64 = image_to_base64(img_to_send)
+                img_to_send = Image.open(up_file); img_base64 = image_to_base64(img_to_send)
 
             save_chat_message("user", p, selected_task_id, img_base64)
-            
-            # Context Building
             ctx = tasks_df.to_string() if not tasks_df.empty else "No tasks."
             if selected_task_id:
                 docs = get_task_documents(selected_task_id)
                 for d in docs: ctx += f"\nFILE: {d['filename']}\nCONTENT: {d['content'][:10000]}"
 
-            # Agent Response
             with st.spinner("Thinking..."):
                 reply = ask_agent(p, ctx, img_to_send)
-            
             save_chat_message("assistant", reply, selected_task_id)
-            
-            # If task created, rerun to update calendar
             if "Scheduled:" in reply or "Created task" in reply: time.sleep(1); st.rerun()
             else: st.rerun()
 
-        # Render History
         with history_container:
             history = get_chat_history(selected_task_id)
-            if not history:
-                st.info("👋 Hi! I'm DeskBot. I can read your PDFs, see your images, and manage your schedule.")
+            if not history: st.info("👋 Hi! I'm DeskBot. I can read your PDFs, see images, and schedule tasks.")
             for msg in history:
                 with st.chat_message(msg["role"]):
                     if msg.get("image_data"):
@@ -282,7 +256,7 @@ def main_app():
                         except: pass
                     st.markdown(msg["content"])
 
-    # === TAB 2: DASHBOARD (Calendar + Grid) ===
+    # === DASHBOARD (PLAN & CALENDAR) ===
     with tab_plan:
         c_cal, c_list = st.columns([2, 1])
         
@@ -294,48 +268,34 @@ def main_app():
                     color = "#4CAF50" if row['status'] == 'done' else "#2196F3"
                     cal_events.append({
                         "title": row['title'],
-                        "start": row['due_date'], # Must be YYYY-MM-DD
+                        "start": str(row['due_date']), # FIX: Convert to string ONLY here
                         "allDay": True,
-                        "backgroundColor": color,
-                        "borderColor": color
+                        "backgroundColor": color, "borderColor": color
                     })
-                # Simple Calendar View
-                calendar(events=cal_events, options={
-                    "headerToolbar": {"left": "prev,next today", "center": "title", "right": "dayGridMonth,timeGridWeek"},
-                    "initialView": "dayGridMonth",
-                    "height": 500
-                })
-            else:
-                st.info("No tasks scheduled yet.")
+                calendar(events=cal_events, options={"headerToolbar": {"left": "prev,next today", "center": "title", "right": "dayGridMonth"}, "initialView": "dayGridMonth", "height": 500})
+            else: st.info("No tasks.")
 
         with c_list:
             st.subheader("Task List")
             if not tasks_df.empty:
                 edited = st.data_editor(
-                    tasks_df, 
-                    key="editor", 
-                    hide_index=True,
-                    use_container_width=True,
+                    tasks_df, key="editor", hide_index=True, use_container_width=True,
                     column_config={
-                        "id": None, "user_id": None, "est_minutes": None, # Hide technical cols
+                        "id": None, "user_id": None, "est_minutes": None,
                         "title": st.column_config.TextColumn("Task"),
                         "due_date": st.column_config.DateColumn("Due"),
                         "status": st.column_config.SelectboxColumn("Status", options=["todo", "done"])
                     }
                 )
-                
-                # Handle Edits/Deletes
                 if st.session_state["editor"]["edited_rows"]:
                     for idx, updates in st.session_state["editor"]["edited_rows"].items():
                         update_task_in_db(tasks_df.iloc[idx]["id"], updates)
                     st.rerun()
-                
                 if st.session_state["editor"]["deleted_rows"]:
                     for idx in st.session_state["editor"]["deleted_rows"]:
                         delete_task_in_db(tasks_df.iloc[idx]["id"])
                     st.rerun()
-            else:
-                st.caption("Your list is empty.")
+            else: st.caption("List empty.")
 
 if st.session_state.user: main_app()
 else: login_page()
