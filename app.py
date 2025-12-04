@@ -1,45 +1,129 @@
 import streamlit as st
+import sqlite3
+import pandas as pd
 import google.generativeai as genai
-import sys
 
-st.title("🔧 DeskBot Diagnostic Tool")
+# --- 1. SETUP & CONFIG ---
+st.set_page_config(page_title="DeskBot: AI Agent", page_icon="🤖", layout="wide")
 
-# 1. Check Python & Library Versions
-st.subheader("1. System Check")
-try:
-    st.write(f"Python Version: `{sys.version}`")
-    st.write(f"Google GenAI Library Version: `{genai.__version__}`")
-    
-    # Check if the library is the new one (0.8.0+) or old
-    if genai.__version__ < "0.8.0":
-        st.error("❌ Library is too old! It doesn't know about 'Flash'. We need to fix requirements.txt.")
-    else:
-        st.success("✅ Library version is good.")
-except Exception as e:
-    st.error(f"Error checking version: {e}")
-
-# 2. Check API Key
-st.subheader("2. API Connection")
+# Connect to Google Gemini
 if "GOOGLE_API_KEY" in st.secrets:
-    st.success("✅ API Key found in Secrets!")
-    
-    try:
-        genai.configure(api_key=st.secrets["GOOGLE_API_KEY"])
-        st.write("Asking Google for available models...")
-        
-        # 3. List Available Models
-        models = []
-        for m in genai.list_models():
-            if 'generateContent' in m.supported_generation_methods:
-                models.append(m.name)
-        
-        if models:
-            st.success(f"✅ Connection Successful! Found {len(models)} models.")
-            st.json(models) # Prints the list nicely
-        else:
-            st.warning("⚠️ Connected, but found 0 models. This usually means the API Key has the wrong permissions.")
-            
-    except Exception as e:
-        st.error(f"❌ Connection Failed: {e}")
+    genai.configure(api_key=st.secrets["GOOGLE_API_KEY"])
+    # WE USE THE MODEL FOUND IN YOUR DIAGNOSTIC LIST
+    model = genai.GenerativeModel('gemini-2.0-flash')
 else:
-    st.error("❌ No API Key found. Go to 'Manage App' > 'Settings' > 'Secrets' on Streamlit Cloud.")
+    st.error("⚠️ Google API Key missing! Please add it to Streamlit Secrets.")
+
+# Database Setup
+def init_db():
+    conn = sqlite3.connect("deskbot.db")
+    c = conn.cursor()
+    c.execute('''CREATE TABLE IF NOT EXISTS tasks (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    title TEXT,
+                    est_minutes INTEGER,
+                    due_date TEXT,
+                    status TEXT DEFAULT 'todo'
+                )''')
+    conn.commit()
+    conn.close()
+
+init_db()
+
+# --- 2. HELPER FUNCTIONS ---
+def get_tasks():
+    conn = sqlite3.connect("deskbot.db")
+    try:
+        df = pd.read_sql("SELECT * FROM tasks", conn)
+    except:
+        df = pd.DataFrame()
+    conn.close()
+    return df
+
+def add_task(title, est, due):
+    conn = sqlite3.connect("deskbot.db")
+    c = conn.cursor()
+    c.execute("INSERT INTO tasks (title, est_minutes, due_date) VALUES (?, ?, ?)", 
+              (title, est, str(due)))
+    conn.commit()
+    conn.close()
+
+def delete_task(task_id):
+    conn = sqlite3.connect("deskbot.db")
+    c = conn.cursor()
+    c.execute("DELETE FROM tasks WHERE id=?", (task_id,))
+    conn.commit()
+    conn.close()
+
+# --- 3. THE AI BRAIN ---
+def ask_gemini(user_message, task_list_text):
+    try:
+        system_instruction = f"""
+        You are DeskBot, a smart personal productivity assistant.
+        
+        User's Current Tasks:
+        {task_list_text}
+        
+        User's Message: "{user_message}"
+        
+        Goal: Help the user plan their day, prioritize tasks, or answer questions.
+        """
+        response = model.generate_content(system_instruction)
+        return response.text
+    except Exception as e:
+        return f"⚠️ AI Error: {e}"
+
+# --- 4. THE UI ---
+st.title("🤖 DeskBot: AI Agent")
+st.caption("Powered by Google Gemini 2.0 Flash")
+
+col1, col2 = st.columns([1, 2])
+
+# LEFT: Task Management
+with col1:
+    st.subheader("📝 Quick Add")
+    with st.form("task_form"):
+        task_title = st.text_input("Task Name")
+        est = st.number_input("Minutes", 15, 120, 60, step=15)
+        due = st.date_input("Due")
+        if st.form_submit_button("Add Task"):
+            add_task(task_title, est, due)
+            st.success("Added!")
+            st.rerun()
+
+    st.divider()
+    
+    tasks = get_tasks()
+    if not tasks.empty:
+        st.dataframe(tasks[['title', 'due_date']], hide_index=True, use_container_width=True)
+        task_context = tasks[['title', 'est_minutes', 'due_date']].to_string(index=False)
+        
+        task_del = st.selectbox("Remove:", tasks['id'].astype(str) + " - " + tasks['title'])
+        if st.button("Delete"):
+            delete_task(task_del.split(" - ")[0])
+            st.rerun()
+    else:
+        task_context = "No tasks currently."
+        st.info("No tasks yet.")
+
+# RIGHT: Chat Interface
+with col2:
+    st.subheader("💬 Chat with your Data")
+    
+    if "messages" not in st.session_state:
+        st.session_state.messages = []
+
+    for msg in st.session_state.messages:
+        with st.chat_message(msg["role"]):
+            st.markdown(msg["content"])
+
+    if prompt := st.chat_input("Ask me to plan your day..."):
+        with st.chat_message("user"):
+            st.markdown(prompt)
+        st.session_state.messages.append({"role": "user", "content": prompt})
+
+        with st.chat_message("assistant"):
+            with st.spinner("Thinking..."):
+                ai_reply = ask_gemini(prompt, task_context)
+                st.markdown(ai_reply)
+        st.session_state.messages.append({"role": "assistant", "content": ai_reply})
