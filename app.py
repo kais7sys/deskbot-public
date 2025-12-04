@@ -9,7 +9,7 @@ st.set_page_config(page_title="DeskBot: AI Agent", page_icon="🤖", layout="wid
 # Connect to Google Gemini
 if "GOOGLE_API_KEY" in st.secrets:
     genai.configure(api_key=st.secrets["GOOGLE_API_KEY"])
-    # WE USE THE MODEL FOUND IN YOUR DIAGNOSTIC LIST
+    # WE ARE USING THE NEWEST MODEL FOUND IN YOUR LIST
     model = genai.GenerativeModel('gemini-2.0-flash')
 else:
     st.error("⚠️ Google API Key missing! Please add it to Streamlit Secrets.")
