@@ -13,15 +13,16 @@ from datetime import datetime, date
 import graphviz
 
 # ==============================================================================
-# 1. SYSTEM INIT & UI OVERRIDE
+# 1. SYSTEM CONFIGURATION & UI OVERRIDE
 # ==============================================================================
-st.set_page_config(page_title="DeskBot // Workspace", page_icon="⚡", layout="wide")
+st.set_page_config(page_title="DeskBot // Workspace", page_icon="⚡", layout="wide", initial_sidebar_state="expanded")
 
-# This CSS is reverse-engineered to mimic the Notion Dark Mode UI
+# Injecting Industrial-Grade CSS to force the Notion Look
+# This overrides Streamlit's defaults to match your desired aesthetic.
 st.markdown("""
 <style>
-    /* GLOBAL DARK THEME & TYPOGRAPHY */
-    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600&display=swap');
+    /* GLOBAL RESET */
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap');
     
     html, body, [class*="css"] {
         font-family: 'Inter', sans-serif;
@@ -36,7 +37,10 @@ st.markdown("""
     [data-testid="stSidebar"] {
         background-color: #202020;
         border-right: 1px solid #2F2F2F;
-        padding-top: 2rem;
+        padding-top: 1rem;
+    }
+    [data-testid="stSidebar"] hr {
+        border-color: #333;
     }
     
     /* INPUT FIELDS - FLATTENED & MINIMAL */
@@ -45,25 +49,33 @@ st.markdown("""
         color: #E3E3E3 !important;
         border: 1px solid #3F3F3F !important; 
         border-radius: 6px;
+        font-size: 14px;
+    }
+    .stTextInput input:focus, .stTextArea textarea:focus {
+        border-color: #555 !important;
+        box-shadow: none !important;
     }
     
     /* REMOVE STREAMLIT BLOAT */
     header[data-testid="stHeader"] {display: none;}
     #MainMenu {visibility: hidden;}
     footer {visibility: hidden;}
-    .block-container {padding-top: 1rem; padding-bottom: 5rem;}
+    .block-container {padding-top: 1.5rem; padding-bottom: 5rem; padding-left: 2rem; padding-right: 2rem;}
 
-    /* TABS ARCHITECTURE */
+    /* TABS ARCHITECTURE - CLEAN & MODERN */
     .stTabs [data-baseweb="tab-list"] {
-        gap: 20px; 
+        gap: 24px; 
         border-bottom: 1px solid #2F2F2F;
+        padding-bottom: 0px;
     }
     .stTabs [data-baseweb="tab"] {
         height: 40px; 
         border: none; 
         background-color: transparent; 
         color: #888;
-        font-weight: 600;
+        font-weight: 500;
+        font-size: 14px;
+        padding: 0 4px;
     }
     .stTabs [aria-selected="true"] {
         color: #FFF !important; 
@@ -74,38 +86,71 @@ st.markdown("""
     .stChatMessage {
         background-color: transparent;
         border: none;
+        padding: 10px 0;
     }
     [data-testid="stChatMessageAvatarUser"], [data-testid="stChatMessageAvatarAssistant"] {
         display: none; /* Hide Icons for minimalism */
     }
-    .stChatMessageContent {
-        border-left: 2px solid #333;
-        padding-left: 15px;
+    /* User Message */
+    [data-testid="stChatMessage"]:nth-child(odd) {
+        flex-direction: row-reverse;
+        text-align: right;
+    }
+    [data-testid="stChatMessage"]:nth-child(odd) .stChatMessageContent {
+        background-color: #333;
+        border-radius: 12px;
+        padding: 12px 16px;
+        display: inline-block;
+        max-width: 80%;
+    }
+    /* AI Message */
+    [data-testid="stChatMessage"]:nth-child(even) .stChatMessageContent {
+        background-color: transparent;
+        padding: 0;
+        color: #E3E3E3;
     }
 
-    /* BUTTONS */
+    /* BUTTONS - SUBTLE & INTERACTIVE */
     .stButton button {
         background-color: #2B2B2B;
         color: #CCC;
         border: 1px solid #3F3F3F;
         border-radius: 6px;
-        transition: all 0.2s ease;
+        transition: all 0.1s ease;
+        font-size: 14px;
+        height: 38px;
     }
     .stButton button:hover {
         background-color: #383838;
-        border-color: #FFF;
+        border-color: #555;
         color: #FFF;
+    }
+    /* Primary Action Buttons */
+    div[data-testid="stVerticalBlock"] > div > .stButton > button {
+       width: 100%;
+       text-align: left;
+       justify-content: flex-start;
+       padding-left: 12px;
+    }
+
+    /* CUSTOM CARDS */
+    div.css-1r6slb0 {
+        border: 1px solid #333;
+        border-radius: 8px;
+        padding: 16px;
+        background-color: #1E1E1E;
     }
 </style>
 """, unsafe_allow_html=True)
 
-# State Management (The Brain's Short Term Memory)
+# State Management Initialization
 if "user" not in st.session_state: st.session_state.user = None
 if "active_notebook_id" not in st.session_state: st.session_state.active_notebook_id = None
 if "chat_session" not in st.session_state: st.session_state.chat_session = None
+if "settings_open" not in st.session_state: st.session_state.settings_open = False
 
 # ==============================================================================
-# 2. BACKEND CONNECTION (SUPABASE)
+# 2. BACKEND INFRASTRUCTURE
 # ==============================================================================
 @st.cache_resource
 def init_supabase():
@@ -114,7 +159,7 @@ def init_supabase():
     return create_client(url, key)
 
 try: supabase = init_supabase()
-except: st.error("⚠️ CRITICAL ERROR: Database Connection Failed. Check Secrets.")
+except: st.error("⚠️ SYSTEM ERROR: Database Credentials Missing.")
 
 # ==============================================================================
 # 3. UTILITIES & I/O
@@ -135,16 +180,15 @@ def extract_pdf(file):
     except: return None
 
 # ==============================================================================
-# 4. DATABASE CONTROLLER CLASS
+# 4. DATABASE CONTROLLER
 # ==============================================================================
 class DB:
-    """Encapsulated Database Logic for Security and cleanliness."""
+    """Encapsulated Database Logic."""
     
     @staticmethod
     def get_workspaces(user_id):
-        # We treat 'tasks' with no parent as workspaces for simplicity in this MVP
         try:
-            res = supabase.table("tasks").select("*").eq("user_id", user_id).order("id", desc=True).execute()
+            res = supabase.table("tasks").select("*").eq("user_id", user_id).order("created_at", desc=True).execute()
             df = pd.DataFrame(res.data)
             if not df.empty:
                 df["id"] = pd.to_numeric(df["id"]).astype(int)
@@ -183,33 +227,62 @@ class DB:
             return res.data
         except: return []
 
+    @staticmethod
+    def create_task(user_id, workspace_id, title, est, due):
+        try:
+            supabase.table("tasks").insert({
+                "user_id": user_id, "workspace_id": workspace_id,
+                "title": title, "est_minutes": est, "due_date": due
+            }).execute()
+            return True
+        except: return False
+
+    @staticmethod
+    def update_task(tid, updates):
+        try: supabase.table("tasks").update(updates).eq("id", tid).execute()
+        except: pass
+
+    @staticmethod
+    def delete_task(tid):
+        try: supabase.table("tasks").delete().eq("id", tid).execute()
+        except: pass
+
+    @staticmethod
+    def save_doc(user_id, workspace_id, filename, content):
+        try:
+            supabase.table("documents").insert({
+                "user_id": user_id, "workspace_id": workspace_id,
+                "filename": filename, "content": content
+            }).execute()
+        except: pass
+
+    @staticmethod
+    def get_docs(workspace_id):
+        try:
+            res = supabase.table("documents").select("id, filename, content").eq("task_id", workspace_id).execute()
+            return res.data
+        except: return []
+
+    @staticmethod
+    def delete_doc(doc_id):
+        try: supabase.table("documents").delete().eq("id", doc_id).execute()
+        except: pass
+
 # ==============================================================================
-# 5. AGENTIC AI LOGIC
+# 5. INTELLIGENCE LAYER
 # ==============================================================================
 if "GOOGLE_API_KEY" in st.secrets:
     genai.configure(api_key=st.secrets["GOOGLE_API_KEY"])
 
-    # --- THE TOOLBOX ---
     def add_task_tool(task_title: str, duration_minutes: int, due_date: str):
-        """Adds a task to DB. duration_minutes must be INT. due_date YYYY-MM-DD."""
+        """Adds a task. Duration must be INT. Date YYYY-MM-DD."""
         if not st.session_state.active_notebook_id: return "Error: No workspace selected."
         try:
-            # Type safety enforcement
             if not isinstance(duration_minutes, int): duration_minutes = 60
-            
-            # Use current user ID
-            uid = st.session_state.user.id
-            
-            supabase.table("tasks").insert({
-                "user_id": uid, 
-                "title": task_title, 
-                "est_minutes": duration_minutes, 
-                "due_date": due_date
-            }).execute()
+            DB.create_task(st.session_state.user.id, st.session_state.active_notebook_id, task_title, duration_minutes, due_date)
             return f"✅ Scheduled: '{task_title}' on {due_date}"
-        except Exception as e: return f"❌ Database Error: {e}"
+        except Exception as e: return f"❌ Error: {e}"
 
-    # Initialize Gemini 2.0 with Tools
     model = genai.GenerativeModel('gemini-2.0-flash', tools=[add_task_tool])
     
     if "chat_session" not in st.session_state or st.session_state.chat_session is None:
@@ -236,29 +309,33 @@ def ask_agent(user_msg, context, image_data=None):
     except Exception as e: return f"AI Error: {e}"
 
 # ==============================================================================
-# 6. UI COMPONENT RENDERING
+# 6. UI COMPONENTS
 # ==============================================================================
 def auth_view():
-    c1, c2, c3 = st.columns([1,2,1])
+    c1, c2, c3 = st.columns([1,1.5,1])
     with c2:
-        st.title("⚡ DeskBot // Access")
-        st.markdown("### Secure Workspace Login")
+        st.markdown("<h1 style='text-align: center; color: white;'>⚡ DeskBot</h1>", unsafe_allow_html=True)
+        st.markdown("<p style='text-align: center; color: #888;'>Secure Neural Workspace</p>", unsafe_allow_html=True)
+        st.markdown("---")
+        
         tab1, tab2 = st.tabs(["Login", "Register"])
         
         with tab1:
             with st.form("login"):
-                e = st.text_input("Email"); p = st.text_input("Password", type="password")
+                e = st.text_input("Email", placeholder="user@example.com")
+                p = st.text_input("Password", type="password")
                 if st.form_submit_button("Enter System", use_container_width=True):
                     try:
                         res = supabase.auth.sign_in_with_password({"email":e,"password":p})
                         st.session_state.user = res.user
-                        DB.log_login(res.user.id) # Audit Log
+                        DB.log_login(res.user.id)
                         st.rerun()
                     except Exception as err: st.error(f"Access Denied: {err}")
         
         with tab2:
             with st.form("signup"):
-                e = st.text_input("Email"); p = st.text_input("Pass (min 6)", type="password")
+                e = st.text_input("Email", placeholder="user@example.com")
+                p = st.text_input("Password (min 6)", type="password")
                 if st.form_submit_button("Create Identity", use_container_width=True):
                     try:
                         res = supabase.auth.sign_up({"email":e,"password":p})
@@ -270,96 +347,91 @@ def main_view():
     user = st.session_state.user
     workspaces = DB.get_workspaces(user.id)
     
-    # --- SIDEBAR: NAVIGATION ---
+    # --- SIDEBAR NAVIGATION ---
     with st.sidebar:
-        st.caption("WORKSPACE")
+        st.markdown("#### ⚡ WORKSPACE")
         
-        if st.button("➕ New Workspace", use_container_width=True, type="primary"):
+        # New Workspace Button
+        if st.button("➕ New Workspace", use_container_width=True):
             st.session_state.show_create_modal = True
             
         if st.session_state.get("show_create_modal"):
-            with st.form("new_ws"):
-                title = st.text_input("Name")
-                if st.form_submit_button("Create"):
-                    if title:
-                        new_id = DB.create_workspace(user.id, title)
-                        st.session_state.active_notebook_id = new_id
-                        st.session_state.show_create_modal = False
-                        st.rerun()
+            with st.container():
+                st.markdown("---")
+                with st.form("new_ws"):
+                    title = st.text_input("Name", placeholder="Project Alpha")
+                    if st.form_submit_button("Create"):
+                        if title:
+                            new_id = DB.create_workspace(user.id, title)
+                            st.session_state.active_notebook_id = new_id
+                            st.session_state.show_create_modal = False
+                            st.rerun()
 
-        # Selector Logic
+        # Workspace Selector
         selected_ws_id = None
-        selected_ws_title = "General"
+        selected_ws_title = "Select Workspace"
         
         if not workspaces.empty:
-            options = ["General"] + workspaces['title'].tolist()
+            options = ["Select..."] + workspaces['title'].tolist()
             ids = [None] + workspaces['id'].tolist()
             
-            # Sync session state
             curr = st.session_state.active_notebook_id
             idx = ids.index(curr) if curr in ids else 0
             
             choice = st.selectbox("Active Notebook", options, index=idx, label_visibility="collapsed")
             
-            if choice != "General":
+            if choice != "Select...":
                 selected_ws_id = ids[options.index(choice)]
                 selected_ws_title = choice
                 st.session_state.active_notebook_id = selected_ws_id
             else:
                 st.session_state.active_notebook_id = None
 
-        st.divider()
-        st.caption("SOURCES")
+        st.markdown("---")
+        st.markdown("#### 📂 SOURCES")
         
         if selected_ws_id:
-            # File List
-            try:
-                docs = supabase.table("documents").select("*").eq("task_id", selected_ws_id).execute().data
+            docs = DB.get_docs(selected_ws_id)
+            if docs:
                 for d in docs:
                     c1, c2 = st.columns([5,1])
-                    c1.caption(f"📄 {d['filename'][:15]}...")
-                    if c2.button("×", key=f"d{d['id']}"): 
-                        supabase.table("documents").delete().eq("id", d['id']).execute()
-                        st.rerun()
-            except: pass
+                    c1.caption(f"📄 {d['filename'][:18]}...")
+                    if c2.button("×", key=f"del_{d['id']}"): DB.delete_doc(d['id']); st.rerun()
+            else: st.caption("No sources attached.")
             
-            # File Uploader
-            with st.expander("Add Source (+)", expanded=False):
-                up_file = st.file_uploader("Upload", type=["pdf", "png", "jpg"], label_visibility="collapsed")
+            with st.expander("Upload Data", expanded=False):
+                up_file = st.file_uploader("File", type=["pdf", "png", "jpg"], label_visibility="collapsed")
                 if up_file:
                     if up_file.type == "application/pdf":
                         if st.button("Index PDF", use_container_width=True):
                             txt = extract_pdf(up_file)
-                            if txt: 
-                                supabase.table("documents").insert({"user_id": user.id, "filename": up_file.name, "content": txt, "task_id": selected_ws_id}).execute()
-                                st.success("Indexed"); st.rerun()
-                    else:
-                        st.image(Image.open(up_file), width=100)
+                            if txt: DB.save_doc(user.id, selected_ws_id, up_file.name, txt); st.success("Indexed"); st.rerun()
+                    else: st.image(Image.open(up_file), width=100)
         else:
-            st.caption("Select a workspace.")
+            st.caption("Select workspace first.")
 
-        st.divider()
-        # Settings Button (Visual Only for MVP)
-        if st.button("⚙️ Settings"):
-            st.toast("Settings module loaded (v1.0)")
+        st.markdown("---")
+        # Settings & Logout
+        if st.button("⚙️ Settings", use_container_width=True):
+            st.toast("Settings Module Active (v1.0)")
             
-        if st.button("Log Out"): 
+        if st.button("Log Out", use_container_width=True): 
             supabase.auth.sign_out()
             st.session_state.user = None
             st.rerun()
 
-    # --- MAIN CANVAS (SPLIT VIEW) ---
-    col_chat, col_studio = st.columns([1, 1.3], gap="medium")
+    # --- MAIN CANVAS ---
+    col_chat, col_studio = st.columns([1, 1.4], gap="large")
 
     # === LEFT: CHAT INTERFACE ===
     with col_chat:
-        st.subheader(f"💬 {selected_ws_title}")
-        chat_box = st.container(height=600)
+        st.markdown(f"### 💬 {selected_ws_title}")
+        chat_box = st.container(height=650)
         
         with chat_box:
             if selected_ws_id:
                 history = DB.get_chat(selected_ws_id)
-                if not history: st.info("Neural link established. Ready.")
+                if not history: st.markdown("*System initialized. Awaiting commands.*")
                 for msg in history:
                     with st.chat_message(msg["role"]):
                         if msg.get("image_data"):
@@ -367,9 +439,9 @@ def main_view():
                             except: pass
                         st.write(msg["content"])
             else:
-                st.info("Select a workspace to initialize chat.")
+                st.info("Please select a workspace to initialize the neural link.")
 
-        if p := st.chat_input("Command..."):
+        if p := st.chat_input("Command the system..."):
             if not selected_ws_id: st.error("No workspace selected."); st.stop()
             
             img_to_send = None; img_base64 = None
@@ -378,10 +450,9 @@ def main_view():
 
             DB.save_chat(user.id, selected_ws_id, "user", p, img_base64)
             
-            # Context RAG
             ctx = workspaces.to_string()
             try:
-                docs = supabase.table("documents").select("content").eq("task_id", selected_ws_id).execute().data
+                docs = DB.get_docs(selected_ws_id)
                 for d in docs: ctx += f"\nDOC: {d['content'][:15000]}"
             except: pass
 
@@ -393,7 +464,7 @@ def main_view():
 
     # === RIGHT: STUDIO INTERFACE ===
     with col_studio:
-        st.subheader("🛠️ Studio")
+        st.markdown("### 🛠️ Studio")
         
         tab_cal, tab_mind, tab_sum = st.tabs(["Plan & Calendar", "Mind Map", "Summary"])
 
@@ -410,44 +481,42 @@ def main_view():
                 calendar(events=cal_events, options={"headerToolbar": {"left": "prev,next", "center": "title", "right": "dayGridMonth"}, "height": 350})
                 
                 st.divider()
-                st.caption("Task Database")
+                st.caption("Database View")
                 edited = st.data_editor(workspaces, key="editor", hide_index=True, use_container_width=True)
-                # (Update logic implied for brevity - Streamlit auto-updates session state for editor)
             else: st.info("No active tasks.")
 
         # 2. MIND MAP
         with tab_mind:
-            if st.button("Generate Graph"):
+            if st.button("Generate Knowledge Graph", use_container_width=True):
                 if selected_ws_id:
-                    with st.spinner("Visualizing..."):
+                    with st.spinner("Visualizing Architecture..."):
                         try:
-                            docs = supabase.table("documents").select("content").eq("task_id", selected_ws_id).execute().data
+                            docs = DB.get_docs(selected_ws_id)
                             doc_ctx = "".join([d['content'][:10000] for d in docs])
                             if doc_ctx:
                                 dot = generate_mindmap_code(selected_ws_title, doc_ctx)
                                 if dot: st.graphviz_chart(dot)
                                 else: st.error("Visualization Failed.")
-                            else: st.warning("Upload PDF source first.")
-                        except: st.error("Error reading docs.")
+                            else: st.warning("Upload source data first.")
+                        except: st.error("Error reading data.")
                 else: st.warning("Select Workspace.")
 
         # 3. SUMMARY
         with tab_sum:
-            if st.button("Synthesize Data"):
+            if st.button("Synthesize Intelligence", use_container_width=True):
                 if selected_ws_id:
                     with st.spinner("Computing..."):
                         try:
-                            docs = supabase.table("documents").select("content").eq("task_id", selected_ws_id).execute().data
+                            docs = DB.get_docs(selected_ws_id)
                             doc_ctx = "".join([d['content'][:15000] for d in docs])
                             if doc_ctx:
                                 summary = ask_agent("Provide an executive summary.", doc_ctx)
                                 st.markdown(summary)
                             else: st.warning("No data sources.")
-                        except: st.error("Error reading docs.")
+                        except: st.error("Error reading data.")
 
 # ==============================================================================
-# 7. EXECUTION ROOT
+# 7. BOOT SEQUENCE
 # ==============================================================================
-if __name__ == "__main__":
-    if st.session_state.user: main_view()
-    else: auth_view()
+if st.session_state.user: main_view()
+else: auth_view()
