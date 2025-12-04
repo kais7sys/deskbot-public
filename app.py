@@ -7,10 +7,9 @@ import time
 from supabase import create_client, Client
 
 # --- 1. CONFIG ---
-st.set_page_config(page_title="DeskBot: Notebooks", page_icon="📓", layout="wide")
+st.set_page_config(page_title="DeskBot: SaaS", page_icon="🏢", layout="wide")
 
-if "authenticated" not in st.session_state: st.session_state.authenticated = False
-if "username" not in st.session_state: st.session_state.username = None
+if "user" not in st.session_state: st.session_state.user = None
 
 # --- 2. DATABASE ---
 @st.cache_resource
@@ -22,34 +21,63 @@ def init_supabase():
 try: supabase = init_supabase()
 except: st.error("⚠️ Supabase Keys missing!")
 
-# --- 3. AUTH ---
-def check_login(u, p):
-    return (u == "kais" and p == "deskbot123") or (u == "admin" and p == "admin")
-
+# --- 3. REAL AUTHENTICATION ---
 def login_page():
-    st.title("☁️ DeskBot Login")
-    with st.form("login"):
-        u = st.text_input("User"); p = st.text_input("Pass", type="password")
-        if st.form_submit_button("Log In"):
-            if check_login(u, p):
-                st.session_state.authenticated = True
-                st.session_state.username = u
-                st.rerun()
-            else: st.error("Invalid")
+    st.title("☁️ DeskBot: Welcome")
+    
+    tab1, tab2 = st.tabs(["Log In", "Sign Up"])
+
+    with tab1:
+        with st.form("login_form"):
+            st.subheader("Welcome Back")
+            email = st.text_input("Email")
+            password = st.text_input("Password", type="password")
+            if st.form_submit_button("Log In"):
+                try:
+                    # SUPABASE LOGIN
+                    response = supabase.auth.sign_in_with_password({"email": email, "password": password})
+                    st.session_state.user = response.user
+                    st.success("Logged in!")
+                    time.sleep(0.5)
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Login failed: {e}")
+
+    with tab2:
+        with st.form("signup_form"):
+            st.subheader("Create Account")
+            new_email = st.text_input("Email")
+            new_password = st.text_input("Password (min 6 chars)", type="password")
+            if st.form_submit_button("Sign Up"):
+                try:
+                    # SUPABASE SIGN UP
+                    response = supabase.auth.sign_up({"email": new_email, "password": new_password})
+                    st.session_state.user = response.user
+                    st.success("Account created! You are logged in.")
+                    time.sleep(0.5)
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Signup failed: {e}")
 
 def logout():
-    st.session_state.authenticated = False; st.rerun()
+    supabase.auth.sign_out()
+    st.session_state.user = None
+    st.rerun()
 
 # --- 4. MAIN APP ---
 def main_app():
-    current_user = st.session_state.username
+    # GET CURRENT USER ID (Not just name, but unique ID)
+    user_id = st.session_state.user.id
+    user_email = st.session_state.user.email
+
     if "GOOGLE_API_KEY" in st.secrets:
         genai.configure(api_key=st.secrets["GOOGLE_API_KEY"])
         model = genai.GenerativeModel('gemini-2.0-flash')
 
-    # --- DB: TASKS ---
+    # --- DB: TASKS (FILTER BY USER_ID) ---
     def get_tasks():
-        res = supabase.table("tasks").select("*").eq("username", current_user).order("id").execute()
+        # SECURITY: Only show tasks where user_id matches
+        res = supabase.table("tasks").select("*").eq("user_id", user_id).order("id").execute()
         df = pd.DataFrame(res.data)
         if not df.empty:
             df["id"] = df["id"].astype(int)
@@ -59,8 +87,9 @@ def main_app():
         return df
 
     def add_task(title, est, due):
+        # SECURITY: Save with user_id
         supabase.table("tasks").insert({
-            "username": current_user, "title": title, "est_minutes": est, "due_date": str(due)
+            "user_id": user_id, "title": title, "est_minutes": est, "due_date": str(due), "username": user_email
         }).execute()
 
     def update_task_in_db(tid, updates):
@@ -71,7 +100,7 @@ def main_app():
 
     # --- DB: DOCUMENTS ---
     def save_document(filename, content, task_id):
-        data = {"username": current_user, "filename": filename, "content": content}
+        data = {"user_id": user_id, "filename": filename, "content": content}
         if task_id: data["task_id"] = int(task_id)
         supabase.table("documents").insert(data).execute()
 
@@ -88,58 +117,42 @@ def main_app():
             return "".join([p.extract_text() for p in reader.pages])
         except: return None
 
-    # --- DB: CHAT HISTORY (NEW!) ---
+    # --- DB: CHAT HISTORY ---
     def save_chat_message(role, content, task_id):
-        data = {
-            "username": current_user,
-            "role": role,
-            "content": content
-        }
-        # If we are in a specific notebook, link it. Otherwise leave task_id null (General Chat)
-        if task_id:
-            data["task_id"] = int(task_id)
-        
+        data = {"user_id": user_id, "role": role, "content": content}
+        if task_id: data["task_id"] = int(task_id)
         supabase.table("chat_history").insert(data).execute()
 
     def get_chat_history(task_id):
-        # Fetch messages for THIS specific task
         if task_id:
-            res = supabase.table("chat_history").select("*").eq("task_id", task_id).eq("username", current_user).order("created_at").execute()
+            res = supabase.table("chat_history").select("*").eq("task_id", task_id).eq("user_id", user_id).order("created_at").execute()
         else:
-            # Fetch "General" messages (where task_id is NULL)
-            res = supabase.table("chat_history").select("*").is_("task_id", "null").eq("username", current_user).order("created_at").execute()
-        
-        return res.data # Returns list of dicts
+            res = supabase.table("chat_history").select("*").is_("task_id", "null").eq("user_id", user_id).order("created_at").execute()
+        return res.data
 
     # --- AI ---
     def ask_gemini(msg, context_text):
         try:
-            sys = f"You are DeskBot. Analyze the following context carefully.\n\nCONTEXT:\n{context_text}\n\nUSER QUESTION: {msg}"
+            sys = f"You are DeskBot.\nCONTEXT:\n{context_text}\nUSER: {msg}"
             return model.generate_content(sys).text
         except Exception as e: return f"AI Error: {e}"
 
     # --- UI LAYOUT ---
-    
-    # 1. LOAD TASKS
     tasks_df = get_tasks()
     
     with st.sidebar:
-        st.header(f"👤 {current_user}")
+        st.caption(f"Logged in as: {user_email}")
         if st.button("Log Out"): logout()
         st.divider()
 
-        # --- FOCUS MODE SELECTOR ---
+        # NOTEBOOKS
         st.header("🎯 Notebooks")
-        st.caption("Select a Task to switch Chat History:")
-        
         selected_task_id = None
         selected_task_title = "General"
         
         if not tasks_df.empty:
             task_options = {f"{row['id']} - {row['title']}": row['id'] for i, row in tasks_df.iterrows()}
             options_list = ["No Focus (General)"] + list(task_options.keys())
-            
-            # Using session_state to track selection helps prevent reset glitches
             choice = st.selectbox("Active Notebook", options_list)
             
             if choice != "No Focus (General)":
@@ -147,8 +160,6 @@ def main_app():
                 selected_task_title = choice.split(" - ")[1]
         
         st.divider()
-        
-        # --- FILES ---
         if selected_task_id:
             st.subheader(f"📂 Files: {selected_task_title}")
             task_docs = get_task_documents(selected_task_id)
@@ -165,16 +176,13 @@ def main_app():
                     txt = extract_pdf(up_file)
                     if txt:
                         save_document(up_file.name, txt, selected_task_id)
-                        st.success("Saved!")
-                        time.sleep(1); st.rerun()
+                        st.success("Saved!"); time.sleep(1); st.rerun()
 
-    # --- MAIN PAGE ---
     st.title(f"📓 {selected_task_title}")
-
-    tab1, tab2 = st.tabs(["📝 Task Grid", "💬 Notebook Chat"])
+    tab1, tab2 = st.tabs(["📝 Task Grid", "💬 Chat"])
 
     with tab1:
-        with st.expander("➕ Add New Notebook/Task"):
+        with st.expander("➕ Add New Notebook"):
             with st.form("add"):
                 c1,c2,c3,c4 = st.columns([3,1,1,1])
                 t=c1.text_input("Title"); e=c2.number_input("Min",15,120,60); d=c3.date_input("Due")
@@ -183,58 +191,44 @@ def main_app():
         if not tasks_df.empty:
             edited = st.data_editor(tasks_df, key="editor", num_rows="dynamic", hide_index=True,
                 column_config={"id":st.column_config.NumberColumn(disabled=True),
+                               "user_id":st.column_config.TextColumn(disabled=True),
                                "status":st.column_config.SelectboxColumn(options=["todo","done"])})
-            
             if st.session_state["editor"]["edited_rows"]:
                 for idx, updates in st.session_state["editor"]["edited_rows"].items():
                     update_task_in_db(tasks_df.iloc[idx]["id"], updates)
                 st.toast("Updated!")
-            
             if st.session_state["editor"]["deleted_rows"]:
                 for idx in st.session_state["editor"]["deleted_rows"]:
                     delete_task_in_db(tasks_df.iloc[idx]["id"])
                 st.rerun()
 
     with tab2:
-        # 1. LOAD HISTORY FOR THIS SPECIFIC NOTEBOOK
-        # We fetch from DB every time the app reruns to ensure we see the right chat
         history = get_chat_history(selected_task_id)
-        
-        # Display History
         for msg in history:
-            with st.chat_message(msg["role"]):
-                st.markdown(msg["content"])
+            with st.chat_message(msg["role"]): st.markdown(msg["content"])
         
-        # 2. CHAT INPUT
-        if p := st.chat_input(f"Chat about {selected_task_title}..."):
-            # A. Display User Message Immediately
+        if p := st.chat_input("Chat..."):
             with st.chat_message("user"): st.markdown(p)
-            
-            # B. Save User Message to DB
             save_chat_message("user", p, selected_task_id)
-
-            # C. Build Context
+            
             chat_context = ""
             if selected_task_id:
-                current_task_row = tasks_df[tasks_df['id'] == selected_task_id].iloc[0]
-                chat_context += f"TASK: {current_task_row['title']} (Due: {current_task_row['due_date']})\n"
+                row = tasks_df[tasks_df['id'] == selected_task_id].iloc[0]
+                chat_context += f"TASK: {row['title']}\n"
                 docs = get_task_documents(selected_task_id)
                 if docs:
-                    for d in docs: chat_context += f"FILE: {d['filename']}\nCONTENT: {d['content'][:20000]}\n\n"
+                    for d in docs: chat_context += f"FILE: {d['filename']}\nCONTENT: {d['content'][:15000]}\n\n"
             else:
-                chat_context = "GENERAL CONTEXT. User Tasks:\n" + tasks_df.to_string()
+                chat_context = "User Tasks:\n" + tasks_df.to_string()
 
-            # D. Generate AI Response
             with st.chat_message("assistant"):
                 with st.spinner("Thinking..."):
                     reply = ask_gemini(p, chat_context)
                     st.markdown(reply)
-            
-            # E. Save AI Response to DB
             save_chat_message("assistant", reply, selected_task_id)
-            
-            # F. Optional: Rerun to make sure everything is clean
-            # st.rerun() 
 
-if st.session_state.authenticated: main_app()
-else: login_page()
+if st.session_state.user:
+    main_app()
+else:
+    login_page()
+
