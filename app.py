@@ -13,7 +13,7 @@ from datetime import datetime, date
 import graphviz
 
 # ==============================================================================
-# 1. SYSTEM CORE & CSS INJECTION
+# 1. UI ARCHITECTURE (CSS OVERRIDES)
 # ==============================================================================
 st.set_page_config(page_title="DeskBot", page_icon="⚡", layout="wide", initial_sidebar_state="expanded")
 
@@ -29,7 +29,7 @@ st.markdown("""
         border-right: 1px solid #2F2F2F;
     }
     
-    /* 3. FLATTENED INPUTS (Notion Style) */
+    /* 3. FLATTENED INPUTS */
     .stTextInput input, .stTextArea textarea, .stSelectbox div[data-baseweb="select"] {
         background-color: #2B2B2B !important;
         color: white !important;
@@ -41,10 +41,10 @@ st.markdown("""
     #MainMenu {visibility: hidden;}
     header {visibility: hidden;}
     footer {visibility: hidden;}
-    .block-container {padding-top: 1rem; padding-bottom: 5rem;}
+    .block-container {padding-top: 2rem; padding-bottom: 5rem;}
 
     /* 5. TABS (Minimalist) */
-    .stTabs [data-baseweb="tab-list"] {gap: 15px; border-bottom: 1px solid #333;}
+    .stTabs [data-baseweb="tab-list"] {gap: 20px; border-bottom: 1px solid #333;}
     .stTabs [data-baseweb="tab"] {height: 40px; border: none; background: transparent; color: #888;}
     .stTabs [aria-selected="true"] {color: #FFF !important; border-bottom: 2px solid #FFF;}
 
@@ -83,6 +83,12 @@ except: st.error("⚠️ CRITICAL: Database Connection Failed.")
 # ==============================================================================
 class DB:
     @staticmethod
+    def log_login(user_id):
+        # FEATURE: Login History Tracking
+        try: supabase.table("login_logs").insert({"user_id": user_id}).execute()
+        except: pass
+
+    @staticmethod
     def get_workspaces(user_id):
         try:
             res = supabase.table("workspaces").select("*").eq("user_id", user_id).order("created_at", desc=True).execute()
@@ -102,8 +108,10 @@ class DB:
             res = supabase.table("tasks").select("*").eq("workspace_id", ws_id).order("id", desc=True).execute()
             df = pd.DataFrame(res.data)
             if not df.empty:
+                # FIX: Force data types to prevent StreamlitAPIException
                 df["id"] = pd.to_numeric(df["id"]).astype(int)
-                df["due_date"] = pd.to_datetime(df["due_date"], errors='coerce').dt.date
+                # Keep due_date as STRING for Calendar compatibility
+                df["due_date"] = df["due_date"].astype(str)
             return df
         except: return pd.DataFrame()
 
@@ -221,7 +229,7 @@ def auth_view():
                     try:
                         res = supabase.auth.sign_in_with_password({"email":e,"password":p})
                         st.session_state.user = res.user
-                        supabase.table("login_logs").insert({"user_id": res.user.id}).execute()
+                        DB.log_login(res.user.id) # FEATURE: Login History Logged Here
                         st.rerun()
                     except: st.error("Invalid Credentials")
         with tab2:
@@ -242,13 +250,11 @@ def main_view():
     if workspaces.empty:
         new_id = DB.create_workspace(user.id, "General")
         st.session_state.active_ws_id = new_id
-        st.rerun() # Refresh to load the new workspace
+        st.rerun() 
         
-    # Ensure active_ws_id is valid
     if st.session_state.active_ws_id is None and not workspaces.empty:
         st.session_state.active_ws_id = int(workspaces.iloc[0]['id'])
 
-    # Get active workspace details
     active_ws_id = st.session_state.active_ws_id
     active_ws_title = workspaces[workspaces['id'] == active_ws_id].iloc[0]['title']
 
@@ -257,40 +263,45 @@ def main_view():
         st.markdown(f"**{user.email}**")
         st.markdown("### 📂 Workspaces")
         
-        # Workspace Switcher
+        # Workspace Switcher (Persistent)
         for i, row in workspaces.iterrows():
-            if st.button(f"{'🟦' if row['id'] == active_ws_id else '⬜'} {row['title']}", key=f"ws_{row['id']}"):
+            # Highlight active workspace
+            label = f"🟦 {row['title']}" if row['id'] == active_ws_id else f"⬜ {row['title']}"
+            if st.button(label, key=f"ws_{row['id']}"):
                 st.session_state.active_ws_id = row['id']
                 st.rerun()
         
-        # New Workspace Input
         with st.popover("➕ New Workspace", use_container_width=True):
             new_ws_name = st.text_input("Name")
             if st.button("Create"):
                 DB.create_workspace(user.id, new_ws_name)
                 st.rerun()
 
-        st.markdown("---")
         st.markdown("### 📄 Sources")
         
-        docs = DB.get_docs(active_ws_id)
-        if docs:
-            for d in docs:
-                c1, c2 = st.columns([4,1])
-                c1.caption(d['filename'][:20])
-                if c2.button("×", key=f"del_{d['id']}"): DB.delete_doc(d['id']); st.rerun()
-        else:
-            st.caption("No sources.")
-
-        with st.expander("Upload"):
-            up = st.file_uploader("File", label_visibility="collapsed")
-            if up and up.type == "application/pdf":
-                if st.button("Index PDF"):
-                    txt = extract_pdf(up)
-                    if txt: DB.save_doc(user.id, active_ws_id, up.name, txt); st.toast("Saved!"); st.rerun()
+        if active_ws_id:
+            docs = DB.get_docs(active_ws_id)
+            if docs:
+                for d in docs:
+                    c1, c2 = st.columns([5,1])
+                    c1.caption(f"📄 {d['filename'][:18]}...")
+                    if c2.button("×", key=f"del_{d['id']}"): DB.delete_doc(d['id']); st.rerun()
+            else: st.caption("No sources attached.")
+            
+            with st.expander("Upload"):
+                up_file = st.file_uploader("File", type=["pdf", "png", "jpg"], label_visibility="collapsed")
+                if up_file:
+                    if up_file.type == "application/pdf":
+                        if st.button("Index PDF", use_container_width=True):
+                            txt = extract_pdf(up_file)
+                            if txt: DB.save_doc(user.id, active_ws_id, up_file.name, txt); st.toast("Saved!"); st.rerun()
+                    else: st.image(Image.open(up_file), width=100)
 
         st.markdown("---")
-        if st.button("Log Out"): 
+        if st.button("⚙️ Settings", use_container_width=True):
+            st.toast("Login History & Account Settings (v1.0)")
+            
+        if st.button("Log Out", use_container_width=True): 
             supabase.auth.sign_out()
             st.session_state.user = None
             st.rerun()
@@ -315,8 +326,8 @@ def main_view():
 
         if p := st.chat_input("Command..."):
             img, img64 = None, None
-            if 'up' in locals() and up and up.type != "application/pdf":
-                img = Image.open(up); img64 = image_to_base64(img)
+            if 'up_file' in locals() and up_file and up_file.type != "application/pdf":
+                img = Image.open(up_file); img64 = image_to_base64(img)
 
             DB.save_chat(user.id, active_ws_id, "user", p, img64)
             
@@ -341,17 +352,30 @@ def main_view():
             if not tasks.empty:
                 evts = []
                 for _, r in tasks.iterrows():
-                    if pd.notnull(r['due_date']):
-                        evts.append({"title": r['title'], "start": str(r['due_date']), "allDay": True, "backgroundColor": "#3788d8"})
+                    if r['due_date'] and r['due_date'] != "NaT":
+                        evts.append({"title": r['title'], "start": r['due_date'], "allDay": True, "backgroundColor": "#3788d8"})
                 calendar(events=evts, options={"headerToolbar": {"left": "prev,next", "center": "title", "right": "dayGridMonth"}, "height": 350})
                 
                 st.divider()
-                edited = st.data_editor(tasks, key=f"ed_{active_ws_id}", hide_index=True, use_container_width=True, 
-                    column_config={"id":None, "user_id":None, "workspace_id":None, "created_at":None, "est_minutes":None, 
-                    "status":st.column_config.SelectboxColumn("Status", options=["todo", "done"])})
+                # FIX: Data Editor configuration to prevent crash
+                edited = st.data_editor(
+                    tasks, 
+                    key=f"ed_{active_ws_id}", 
+                    hide_index=True, 
+                    use_container_width=True,
+                    column_config={
+                        "id": None, "user_id": None, "workspace_id": None, "created_at": None, "est_minutes": None,
+                        "title": st.column_config.TextColumn("Task"),
+                        "due_date": st.column_config.DateColumn("Due"),
+                        "status": st.column_config.SelectboxColumn("Status", options=["todo", "done"])
+                    }
+                )
                 
                 if st.session_state[f"ed_{active_ws_id}"]["edited_rows"]:
                     for i, u in st.session_state[f"ed_{active_ws_id}"]["edited_rows"].items():
+                        # Convert Date Object back to String for DB
+                        if "due_date" in u and u["due_date"]:
+                            u["due_date"] = u["due_date"].strftime('%Y-%m-%d')
                         DB.update_task(tasks.iloc[i]["id"], u)
                     st.rerun()
                 if st.session_state[f"ed_{active_ws_id}"]["deleted_rows"]:
@@ -379,5 +403,8 @@ def main_view():
                     st.markdown(s)
                 else: st.warning("Upload PDF first")
 
+# ==============================================================================
+# 7. EXECUTION
+# ==============================================================================
 if st.session_state.user: main_view()
 else: auth_view()
