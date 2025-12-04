@@ -12,7 +12,7 @@ from streamlit_calendar import calendar
 from datetime import datetime
 
 # --- 1. CONFIG ---
-st.set_page_config(page_title="DeskBot: Ultimate", page_icon="🤖", layout="wide")
+st.set_page_config(page_title="DeskBot: Agent", page_icon="🤖", layout="wide")
 if "user" not in st.session_state: st.session_state.user = None
 
 # --- 2. DATABASE ---
@@ -68,7 +68,7 @@ def main_app():
     user_id = st.session_state.user.id
     email = st.session_state.user.email
 
-    # --- SAFE DATABASE FUNCTIONS ---
+    # --- DB TOOLS ---
     def get_tasks():
         try:
             res = supabase.table("tasks").select("*").eq("user_id", user_id).order("id").execute()
@@ -81,33 +81,23 @@ def main_app():
             return df
         except: return pd.DataFrame()
 
-    # 🔧 SMART TOOL: Defaults to 60 mins if confused
-    def create_task_tool(title: str, est_minutes: str, due_date: str):
+    def create_task_tool(title: str, duration_minutes: int, due_date: str):
         """
-        Creates a task. 
-        est_minutes: Duration in minutes. If user says '7pm', default to 60.
+        Creates a task.
+        duration_minutes: Duration in minutes (e.g. 60). NOT the time of day.
         due_date: YYYY-MM-DD.
         """
         try:
-            # 1. CLEANUP MINUTES
-            minutes_clean = 60 # Default
+            # Fallback if AI sends 0 or crazy number
+            if duration_minutes < 1: duration_minutes = 30
             
-            # If the AI sends a number (int or string "60"), use it.
-            # If AI sends "7pm", regex won't find a pure number easily, or might find '7'.
-            # We filter for logical duration.
-            
-            nums = re.findall(r'\d+', str(est_minutes))
-            if nums:
-                val = int(nums[0])
-                # If value is small (like 7), it might mean 7 hours? Let's assume minutes for now.
-                # If value is huge, it's fine.
-                minutes_clean = val
-            
-            # 2. SAVE
             supabase.table("tasks").insert({
-                "user_id": user_id, "title": title, "est_minutes": minutes_clean, "due_date": due_date
+                "user_id": user_id, 
+                "title": title, 
+                "est_minutes": duration_minutes, 
+                "due_date": due_date
             }).execute()
-            return f"✅ Created task: '{title}' ({minutes_clean}m) due {due_date}"
+            return f"✅ Created task: '{title}' ({duration_minutes}m) due {due_date}"
         except Exception as e: return f"❌ Error: {e}"
 
     def update_task_in_db(tid, updates):
@@ -119,7 +109,7 @@ def main_app():
             data = {"user_id": user_id, "filename": filename, "content": content}
             if task_id: data["task_id"] = int(task_id)
             supabase.table("documents").insert(data).execute()
-        except: st.error("Save Error")
+        except Exception as e: st.error(f"Save Error: {e}")
 
     def get_task_documents(task_id):
         try:
@@ -137,27 +127,28 @@ def main_app():
             return "".join([p.extract_text() for p in reader.pages])
         except: return None
 
-    # --- AI SETUP ---
+    # --- AI SETUP (FRESH START) ---
     if "GOOGLE_API_KEY" in st.secrets:
         genai.configure(api_key=st.secrets["GOOGLE_API_KEY"])
         my_tools = [create_task_tool]
         model = genai.GenerativeModel('gemini-2.0-flash', tools=my_tools)
-        if "chat_session" not in st.session_state:
+        
+        # 🟢 VITAL FIX: Force create a NEW chat session on every run to bind new tools
+        # We restore history from the DB later, so it's fine to start "fresh" logic-wise.
+        if "chat_session" not in st.session_state or st.session_state.get("needs_refresh", False):
             st.session_state.chat_session = model.start_chat(enable_automatic_function_calling=True)
+            st.session_state.needs_refresh = False
 
     def ask_agent(user_msg, context, image_data=None):
         try:
             today = datetime.now().strftime("%Y-%m-%d")
-            # 🧠 IMPROVED PROMPT: Teach the AI how to handle Time vs Duration
             prompt_parts = [
                 f"""SYSTEM: You are DeskBot. Today is {today}.
                 
-                RULES FOR CREATING TASKS:
-                1. 'est_minutes' MUST be a duration (e.g., 30, 60). 
-                2. If the user gives a specific TIME (e.g., 'at 7pm', 'at 13:00'), DO NOT put it in 'est_minutes'.
-                3. Instead, put the specific time INSIDE the 'title' string.
-                   - Example: User "Gym at 7pm" -> Title: "Gym (7pm)", est_minutes: 60.
-                4. If no duration is specified, default 'est_minutes' to 60.
+                STRICT RULES:
+                1. If user says a TIME (e.g. '7pm'), put it in the TITLE.
+                2. 'duration_minutes' must be an INTEGER (e.g. 30, 60). Default to 60 if unknown.
+                3. Do NOT put '7pm' in duration_minutes.
                 """,
                 f"CONTEXT:\n{context}",
                 f"USER: {user_msg}"
@@ -166,7 +157,10 @@ def main_app():
             
             response = st.session_state.chat_session.send_message(prompt_parts)
             return response.text
-        except Exception as e: return f"AI Error: {e}"
+        except Exception as e: 
+            # If tool fails, force refresh next time
+            st.session_state.needs_refresh = True
+            return f"AI Error: {e}"
 
     # --- CHAT HISTORY ---
     def save_chat_message(role, content, task_id, image_data=None):
@@ -256,7 +250,7 @@ def main_app():
                     except: pass
                 st.markdown(msg["content"])
         
-        if p := st.chat_input("Ex: 'Add a task to call mom at 7pm'"):
+        if p := st.chat_input("Ex: 'Add a task for Physics Exam at 7pm'"):
             img_to_send = None
             img_base64 = None
             if 'up_file' in locals() and up_file and up_file.type != "application/pdf":
