@@ -70,9 +70,23 @@ def main_app():
 
     # --- DATABASE ACTIONS ---
     def get_tasks():
-        # Get tasks sorted by ID so they don't jump around when edited
+        # Get tasks sorted by ID
         response = supabase.table("tasks").select("*").eq("username", current_user).order("id").execute()
-        return pd.DataFrame(response.data)
+        df = pd.DataFrame(response.data)
+        
+        if not df.empty:
+            # 🔧 CRITICAL FIX: Force correct data types
+            # Convert ID and Minutes to Numbers (integers)
+            df["id"] = df["id"].astype(int)
+            df["est_minutes"] = df["est_minutes"].astype(int)
+            
+            # Convert Date string to actual Date Object
+            df["due_date"] = pd.to_datetime(df["due_date"]).dt.date
+            
+            # Ensure Status is a string (handle potential empty values)
+            df["status"] = df["status"].astype(str)
+            
+        return df
 
     def add_task(title, est, due):
         data = {"username": current_user, "title": title, "est_minutes": est, "due_date": str(due), "status": "todo"}
@@ -208,3 +222,4 @@ if st.session_state.authenticated:
     main_app()
 else:
     login_page()
+
