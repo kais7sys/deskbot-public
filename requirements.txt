@@ -6,3 +6,4 @@ PyPDF2
 Pillow
 supabase
 streamlit-calendar
+graphviz
