@@ -10,18 +10,30 @@ from supabase import create_client, Client
 from streamlit_calendar import calendar
 from datetime import datetime, date
 
-# --- 1. CONFIG & STYLE (NOTION LOOK) ---
-st.set_page_config(page_title="DeskBot", page_icon="📓", layout="wide")
+# --- 1. CONFIG & NOTION STYLE ---
+st.set_page_config(page_title="DeskBot Workspace", page_icon="📓", layout="wide")
 
-# Custom CSS for clean UI
+# Custom CSS for Notion-like clean aesthetics
 st.markdown("""
 <style>
-    .block-container {padding-top: 1rem; padding-bottom: 5rem;}
+    /* Clean white background and typography */
+    .stApp {background-color: #ffffff;}
+    
+    /* Sidebar styling */
+    [data-testid="stSidebar"] {background-color: #f7f9fb; border-right: 1px solid #e0e0e0;}
+    
+    /* Clean Tabs */
+    .stTabs [data-baseweb="tab-list"] {gap: 20px; border-bottom: 1px solid #ddd;}
+    .stTabs [data-baseweb="tab"] {height: 45px; font-weight: 500; font-size: 16px;}
+    .stTabs [aria-selected="true"] {color: #000000; border-bottom: 2px solid #000000;}
+    
+    /* Remove default Streamlit clutter */
+    #MainMenu {visibility: hidden;}
+    footer {visibility: hidden;}
     header {visibility: hidden;}
-    [data-testid="stSidebar"] {background-color: #f7f9fb;}
-    .stTabs [data-baseweb="tab-list"] {gap: 24px;}
-    .stTabs [data-baseweb="tab"] {height: 50px; white-space: pre-wrap; background-color: transparent; border-radius: 4px; color: #555;}
-    .stTabs [aria-selected="true"] {background-color: transparent; border-bottom: 2px solid #000; color: #000;}
+    
+    /* Card styling for messages */
+    .stChatMessage {background-color: transparent;}
 </style>
 """, unsafe_allow_html=True)
 
@@ -37,7 +49,7 @@ def init_supabase():
 try: supabase = init_supabase()
 except: st.error("⚠️ Supabase Keys missing!")
 
-# --- 3. HELPERS ---
+# --- 3. HELPER FUNCTIONS ---
 def image_to_base64(image):
     buffered = BytesIO()
     image.save(buffered, format="PNG")
@@ -52,6 +64,7 @@ def login_page():
     c1, c2, c3 = st.columns([1,2,1])
     with c2:
         st.title("📓 DeskBot Workspace")
+        st.caption("Sign in to access your AI Second Brain.")
         tab1, tab2 = st.tabs(["Log In", "Create Account"])
         with tab1:
             with st.form("login"):
@@ -75,7 +88,6 @@ def login_page():
 def logout():
     supabase.auth.sign_out()
     st.session_state.user = None
-    st.session_state.chat_session = None
     st.rerun()
 
 # --- 5. MAIN APP ---
@@ -89,13 +101,22 @@ def main_app():
             res = supabase.table("tasks").select("*").eq("user_id", user_id).order("id").execute()
             df = pd.DataFrame(res.data)
             if not df.empty:
-                df["id"] = df["id"].astype(int)
-                df["est_minutes"] = df["est_minutes"].astype(int)
-                # FIX: Keep it as a Date Object for the Editor
-                df["due_date"] = pd.to_datetime(df["due_date"]).dt.date
+                # 🔧 CRITICAL FIX: Robust Date Conversion
+                # 1. Force ID/Mins to Int
+                df["id"] = pd.to_numeric(df["id"], errors='coerce').fillna(0).astype(int)
+                df["est_minutes"] = pd.to_numeric(df["est_minutes"], errors='coerce').fillna(60).astype(int)
+                
+                # 2. Force Date Object (Handles errors gracefully)
+                df["due_date"] = pd.to_datetime(df["due_date"], errors='coerce').dt.date
+                
+                # 3. Drop rows where date is missing (Prevents Calendar Crash)
+                df = df.dropna(subset=['due_date'])
+                
                 df["status"] = df["status"].astype(str)
             return df
-        except: return pd.DataFrame()
+        except Exception as e: 
+            st.error(f"Data Load Error: {e}")
+            return pd.DataFrame()
 
     def add_task_to_scheduler(task_title: str, duration_minutes: int, due_date: str):
         try:
@@ -142,6 +163,8 @@ def main_app():
         genai.configure(api_key=st.secrets["GOOGLE_API_KEY"])
         my_tools = [add_task_to_scheduler]
         model = genai.GenerativeModel('gemini-2.0-flash', tools=my_tools)
+        
+        # Always fresh session to ensure tools work
         if "chat_session" not in st.session_state:
             st.session_state.chat_session = model.start_chat(enable_automatic_function_calling=True)
 
@@ -149,7 +172,7 @@ def main_app():
         try:
             today = datetime.now().strftime("%Y-%m-%d")
             prompt_parts = [
-                f"SYSTEM: You are DeskBot. Today is {today}. If user gives time (7pm), put it in Title.",
+                f"SYSTEM: You are DeskBot. Today is {today}. If user gives time (e.g. 7pm), put it in Title.",
                 f"CONTEXT:\n{context}", f"USER: {user_msg}"
             ]
             if image_data: prompt_parts.append(image_data)
@@ -204,8 +227,7 @@ def main_app():
                     c1, c2 = st.columns([5,1])
                     c1.caption(f"📄 {d['filename']}")
                     if c2.button("x", key=f"d{d['id']}"): delete_document(d['id']); st.rerun()
-            else:
-                st.caption("No sources.")
+            else: st.caption("No sources.")
             
             with st.expander("Add Source (+)", expanded=False):
                 up_file = st.file_uploader("Upload", type=["pdf", "png", "jpg", "jpeg"], label_visibility="collapsed")
@@ -214,19 +236,17 @@ def main_app():
                         if st.button("Save PDF", use_container_width=True):
                             txt = extract_pdf(up_file)
                             if txt: save_document(up_file.name, txt, selected_task_id); st.success("Saved!"); time.sleep(1); st.rerun()
-                    else:
-                        st.image(Image.open(up_file), caption="Preview", width=150)
-        else:
-            st.caption("Select a notebook to add files.")
+                    else: st.image(Image.open(up_file), caption="Preview", width=150)
+        else: st.caption("Select a notebook to add files.")
 
         st.divider()
         if st.button("Log Out"): logout()
 
-    # --- MAIN TABS ---
+    # --- MAIN CONTENT ---
     st.title(f"{selected_task_title}")
     tab_chat, tab_plan = st.tabs(["💬 Chat", "🗓️ Plan & Calendar"])
 
-    # === CHAT ===
+    # === TAB 1: CHAT ===
     with tab_chat:
         history_container = st.container()
         if p := st.chat_input("Ask DeskBot..."):
@@ -235,7 +255,9 @@ def main_app():
                 img_to_send = Image.open(up_file); img_base64 = image_to_base64(img_to_send)
 
             save_chat_message("user", p, selected_task_id, img_base64)
-            ctx = tasks_df.to_string() if not tasks_df.empty else "No tasks."
+            
+            # Smart Context: Show Task List + Documents
+            ctx = tasks_df[['title', 'due_date', 'status']].to_string() if not tasks_df.empty else "No tasks."
             if selected_task_id:
                 docs = get_task_documents(selected_task_id)
                 for d in docs: ctx += f"\nFILE: {d['filename']}\nCONTENT: {d['content'][:10000]}"
@@ -243,6 +265,7 @@ def main_app():
             with st.spinner("Thinking..."):
                 reply = ask_agent(p, ctx, img_to_send)
             save_chat_message("assistant", reply, selected_task_id)
+            
             if "Scheduled:" in reply or "Created task" in reply: time.sleep(1); st.rerun()
             else: st.rerun()
 
@@ -256,7 +279,7 @@ def main_app():
                         except: pass
                     st.markdown(msg["content"])
 
-    # === DASHBOARD (PLAN & CALENDAR) ===
+    # === TAB 2: DASHBOARD ===
     with tab_plan:
         c_cal, c_list = st.columns([2, 1])
         
@@ -268,12 +291,12 @@ def main_app():
                     color = "#4CAF50" if row['status'] == 'done' else "#2196F3"
                     cal_events.append({
                         "title": row['title'],
-                        "start": str(row['due_date']), # FIX: Convert to string ONLY here
+                        "start": str(row['due_date']), # STR IS SAFE HERE
                         "allDay": True,
                         "backgroundColor": color, "borderColor": color
                     })
-                calendar(events=cal_events, options={"headerToolbar": {"left": "prev,next today", "center": "title", "right": "dayGridMonth"}, "initialView": "dayGridMonth", "height": 500})
-            else: st.info("No tasks.")
+                calendar(events=cal_events, options={"headerToolbar": {"left": "prev,next today", "center": "title", "right": "dayGridMonth"}, "initialView": "dayGridMonth", "height": 550})
+            else: st.info("No tasks scheduled.")
 
         with c_list:
             st.subheader("Task List")
@@ -283,7 +306,7 @@ def main_app():
                     column_config={
                         "id": None, "user_id": None, "est_minutes": None,
                         "title": st.column_config.TextColumn("Task"),
-                        "due_date": st.column_config.DateColumn("Due"),
+                        "due_date": st.column_config.DateColumn("Due"), # DATE OBJECT SAFE HERE
                         "status": st.column_config.SelectboxColumn("Status", options=["todo", "done"])
                     }
                 )
