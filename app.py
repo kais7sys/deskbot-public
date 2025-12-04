@@ -3,9 +3,10 @@ import sqlite3
 import pandas as pd
 import google.generativeai as genai
 from PyPDF2 import PdfReader
+from PIL import Image
 
 # --- 1. SETUP & CONFIG ---
-st.set_page_config(page_title="DeskBot: Second Brain", page_icon="🧠", layout="wide")
+st.set_page_config(page_title="DeskBot: Vision", page_icon="👁️", layout="wide")
 
 # Connect to Google Gemini
 if "GOOGLE_API_KEY" in st.secrets:
@@ -56,7 +57,6 @@ def delete_task(task_id):
     conn.close()
 
 def extract_text_from_pdf(uploaded_file):
-    """Reads a PDF file and returns the text."""
     try:
         pdf_reader = PdfReader(uploaded_file)
         text = ""
@@ -64,52 +64,67 @@ def extract_text_from_pdf(uploaded_file):
             text += page.extract_text() or ""
         return text
     except Exception as e:
-        return f"Error reading PDF: {e}"
+        return None
 
-# --- 3. THE AI BRAIN ---
-def ask_gemini(user_message, task_list_text, document_context=""):
+# --- 3. THE AI BRAIN (NOW WITH VISION) ---
+def ask_gemini(user_message, task_list_text, file_data=None, file_type=None):
     try:
-        # We now give the AI THREE things:
-        # 1. The user's tasks
-        # 2. The user's uploaded document (Syllabus, Notes, etc.)
-        # 3. The user's question
-        
+        # Prompt Logic
         system_instruction = f"""
-        You are DeskBot, a smart productivity assistant and study companion.
+        You are DeskBot.
         
-        CONTEXT 1: User's Current Tasks
+        CONTEXT: User's Tasks:
         {task_list_text}
-        
-        CONTEXT 2: Uploaded Document Content
-        {document_context}
         
         USER MESSAGE: "{user_message}"
         
         INSTRUCTIONS:
-        - If the user asks about the document, answer based on Context 2.
-        - If the user asks to plan their day, use Context 1 (Tasks).
-        - If the user wants to study, use the Document to create a plan or quiz.
+        - If an image is provided, analyze it.
+        - If a PDF text is provided, answer based on it.
+        - If the user asks to add a task, suggest the details.
         """
-        response = model.generate_content(system_instruction)
+        
+        # Prepare the "Package" to send to Gemini
+        content_package = [system_instruction]
+        
+        # Add Image or Text to the package if it exists
+        if file_type == "image":
+            content_package.append(file_data) # Send actual image object
+        elif file_type == "pdf":
+            content_package.append(f"DOCUMENT CONTENT:\n{file_data}") # Send text
+            
+        response = model.generate_content(content_package)
         return response.text
     except Exception as e:
         return f"⚠️ AI Error: {e}"
 
 # --- 4. THE UI ---
-st.title("🧠 DeskBot: Second Brain")
-st.caption("Chat with your Tasks AND your Documents (PDF)")
+st.title("👁️ DeskBot: Vision Agent")
+st.caption("Chat with Tasks, PDFs, or Images")
 
-# SIDEBAR: File Upload
+# SIDEBAR: Universal File Uploader
 with st.sidebar:
-    st.header("📂 Knowledge Base")
-    uploaded_file = st.file_uploader("Upload a PDF (Syllabus, Notes)", type="pdf")
+    st.header("📂 Upload")
+    # We now accept Images AND PDFs
+    uploaded_file = st.file_uploader("Drop a File (PDF, PNG, JPG)", type=["pdf", "png", "jpg", "jpeg"])
     
-    doc_text = ""
+    file_payload = None
+    file_type = None
+
     if uploaded_file is not None:
-        with st.spinner("Reading file..."):
-            doc_text = extract_text_from_pdf(uploaded_file)
-        st.success(f"Loaded {len(doc_text)} characters from {uploaded_file.name}")
-        st.info("I can now answer questions about this file!")
+        # Check if it is an Image or PDF
+        if uploaded_file.type == "application/pdf":
+            file_type = "pdf"
+            with st.spinner("Reading PDF..."):
+                file_payload = extract_text_from_pdf(uploaded_file)
+            st.success("PDF Loaded!")
+            
+        else:
+            file_type = "image"
+            # Load the image for Gemini
+            file_payload = Image.open(uploaded_file)
+            st.image(file_payload, caption="Uploaded Image", use_container_width=True)
+            st.success("Image Loaded!")
 
 col1, col2 = st.columns([1, 2])
 
@@ -151,15 +166,15 @@ with col2:
         with st.chat_message(msg["role"]):
             st.markdown(msg["content"])
 
-    if prompt := st.chat_input("Ask about your PDF or Tasks..."):
+    if prompt := st.chat_input("Ask about the uploaded file..."):
         with st.chat_message("user"):
             st.markdown(prompt)
         st.session_state.messages.append({"role": "user", "content": prompt})
 
         with st.chat_message("assistant"):
-            with st.spinner("Thinking..."):
-                # Pass the Document Text to the AI
-                ai_reply = ask_gemini(prompt, task_context, doc_text)
+            with st.spinner("Looking & Thinking..."):
+                # Send the prompt + the file (Image or Text)
+                ai_reply = ask_gemini(prompt, task_context, file_payload, file_type)
                 st.markdown(ai_reply)
         st.session_state.messages.append({"role": "assistant", "content": ai_reply})
 
