@@ -13,10 +13,11 @@ from datetime import datetime, date
 import graphviz
 
 # ==============================================================================
-# 1. VISUAL ARCHITECTURE (CSS OVERRIDES)
+# 1. UI ARCHITECTURE (CSS INJECTION)
 # ==============================================================================
 st.set_page_config(page_title="DeskBot // Workspace", page_icon="⚡", layout="wide", initial_sidebar_state="expanded")
 
+# This CSS completely redesigns Streamlit to look like your reference image
 st.markdown("""
 <style>
     /* GLOBAL THEME */
@@ -28,7 +29,7 @@ st.markdown("""
         border-right: 1px solid #2F2F2F;
     }
     
-    /* INPUTS */
+    /* FLATTENED INPUTS */
     .stTextInput input, .stTextArea textarea, .stSelectbox div[data-baseweb="select"] {
         background-color: #2B2B2B !important; 
         color: #FFF !important;
@@ -42,7 +43,7 @@ st.markdown("""
     footer {visibility: hidden;}
     .block-container {padding-top: 1.5rem; padding-bottom: 3rem;}
 
-    /* TABS */
+    /* MINIMAL TABS */
     .stTabs [data-baseweb="tab-list"] {gap: 20px; border-bottom: 1px solid #333;}
     .stTabs [data-baseweb="tab"] {height: 40px; background: transparent; color: #888; border: none;}
     .stTabs [aria-selected="true"] {color: #FFF !important; border-bottom: 2px solid #FFF;}
@@ -57,14 +58,8 @@ st.markdown("""
     .stChatMessage {background-color: transparent; border: none; padding: 5px 0;}
     [data-testid="stChatMessageAvatarUser"], [data-testid="stChatMessageAvatarAssistant"] {display: none !important;}
     
-    /* SETTINGS MODAL OVERLAY */
-    .settings-container {
-        background-color: #252525;
-        padding: 20px;
-        border-radius: 12px;
-        border: 1px solid #333;
-        margin-bottom: 20px;
-    }
+    /* MODAL STYLE */
+    div[data-testid="stExpander"] {background-color: #252525; border-radius: 8px; border: 1px solid #333;}
 </style>
 """, unsafe_allow_html=True)
 
@@ -72,7 +67,6 @@ st.markdown("""
 if "user" not in st.session_state: st.session_state.user = None
 if "active_ws_id" not in st.session_state: st.session_state.active_ws_id = None
 if "chat_session" not in st.session_state: st.session_state.chat_session = None
-if "show_settings" not in st.session_state: st.session_state.show_settings = False
 
 # ==============================================================================
 # 2. BACKEND
@@ -91,12 +85,12 @@ if not supabase: st.error("🚨 CRITICAL: Check Supabase Secrets."); st.stop()
 class DB:
     @staticmethod
     def log_login(user_id):
+        # FEATURE: Login Audit Trail
         try: supabase.table("login_logs").insert({"user_id": user_id}).execute()
         except: pass
 
     @staticmethod
     def get_login_history(user_id):
-        # FETCH AUDIT LOGS
         try:
             res = supabase.table("login_logs").select("*").eq("user_id", user_id).order("login_timestamp", desc=True).limit(10).execute()
             return pd.DataFrame(res.data)
@@ -239,7 +233,7 @@ def auth_view():
                     try:
                         res = supabase.auth.sign_in_with_password({"email":e,"password":p})
                         st.session_state.user = res.user
-                        DB.log_login(res.user.id)
+                        DB.log_login(res.user.id) # FEATURE: Logs login to DB
                         st.rerun()
                     except: st.error("Invalid Credentials")
         with tab2:
@@ -253,34 +247,29 @@ def auth_view():
                     except: st.error("Signup failed.")
 
 def settings_view(user):
-    st.markdown("### ⚙️ Settings & Security")
+    st.markdown("### ⚙️ Settings")
+    st.write(f"**Logged in as:** {user.email}")
     
-    with st.container():
-        st.write("#### 👤 User Profile")
-        st.code(f"ID: {user.id}\nEmail: {user.email}")
+    st.markdown("#### 🕒 Login History")
+    logs = DB.get_login_history(user.id)
+    if not logs.empty:
+        st.dataframe(logs, hide_index=True, use_container_width=True)
+    else:
+        st.caption("No history found.")
         
-        st.write("#### 🛡️ Login Audit Log (Last 10)")
-        logs = DB.get_login_history(user.id)
-        if not logs.empty:
-            # Clean up the dataframe for display
-            logs['login_timestamp'] = pd.to_datetime(logs['login_timestamp']).dt.strftime('%Y-%m-%d %H:%M:%S')
-            st.dataframe(logs[['login_timestamp']], use_container_width=True, hide_index=True)
-        else:
-            st.caption("No logs available.")
-            
-        if st.button("Close Settings", type="primary"):
-            st.session_state.show_settings = False
-            st.rerun()
+    if st.button("Close Settings"):
+        st.session_state.show_settings = False
+        st.rerun()
 
 def main_view():
     user = st.session_state.user
     
-    # --- SETTINGS OVERLAY ---
-    if st.session_state.show_settings:
+    # Show settings overlay if active
+    if st.session_state.get("show_settings"):
         settings_view(user)
-        st.stop() # Halt main rendering to show settings
+        st.stop()
 
-    # --- AUTO-INIT ---
+    # --- AUTO-INIT: Ensure a workspace always exists ---
     workspaces = DB.get_workspaces(user.id)
     if workspaces.empty:
         new_id = DB.create_workspace(user.id, "General")
@@ -300,7 +289,7 @@ def main_view():
     with st.sidebar:
         st.markdown(f"**{user.email}**")
         
-        # 1. NEW CHAT
+        # 1. NEW CHAT BUTTON
         if st.button("➕ New Chat", use_container_width=True, type="primary"):
             st.session_state.active_ws_id = None
             st.rerun()
@@ -335,7 +324,6 @@ def main_view():
                     else: st.image(Image.open(up_file), width=100)
 
         st.markdown("---")
-        # SETTINGS TRIGGER
         if st.button("⚙️ Settings", use_container_width=True):
             st.session_state.show_settings = True
             st.rerun()
@@ -426,7 +414,6 @@ def main_view():
                         "status": st.column_config.SelectboxColumn("Status", options=["todo", "done"])
                     }
                 )
-                # Auto-Save Logic
                 if st.session_state[f"ed_{active_ws_id}"]["edited_rows"]:
                     for i, u in st.session_state[f"ed_{active_ws_id}"]["edited_rows"].items():
                         if "due_date" in u and u["due_date"]: u["due_date"] = u["due_date"].strftime('%Y-%m-%d')
@@ -438,8 +425,7 @@ def main_view():
                     st.rerun()
             else: st.info("No tasks in this workspace.")
 
-        # 2. MIND MAP
-        with t2:
+        with t2: # Map
             if st.button("Generate Graph", use_container_width=True):
                 docs = DB.get_docs(active_ws_id)
                 txt = "".join([d['content'][:10000] for d in docs])
@@ -450,8 +436,7 @@ def main_view():
                         else: st.error("Failed")
                 else: st.warning("Upload PDF first")
 
-        # 3. SUMMARY
-        with t3:
+        with t3: # Brief
             if st.button("Synthesize", use_container_width=True):
                 docs = DB.get_docs(active_ws_id)
                 txt = "".join([d['content'][:15000] for d in docs])
