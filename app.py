@@ -13,23 +13,23 @@ from datetime import datetime, date
 import graphviz
 
 # ==============================================================================
-# 1. VISUAL ARCHITECTURE (CSS OVERRIDES)
+# 1. UI ARCHITECTURE (CSS INJECTION)
 # ==============================================================================
-st.set_page_config(page_title="DeskBot", page_icon="⚡", layout="wide", initial_sidebar_state="expanded")
+st.set_page_config(page_title="DeskBot // Workspace", page_icon="⚡", layout="wide", initial_sidebar_state="expanded")
 
-# This CSS forces the "Notion/Gemini" aesthetic.
+# This CSS completely redesigns Streamlit to look like your reference image
 st.markdown("""
 <style>
-    /* GLOBAL: Deep Dark Theme */
+    /* GLOBAL THEME */
     .stApp {background-color: #191919; color: #E0E0E0; font-family: 'Inter', sans-serif;}
     
-    /* SIDEBAR: Distinct & Solid */
+    /* SIDEBAR */
     section[data-testid="stSidebar"] {
         background-color: #202020;
         border-right: 1px solid #2F2F2F;
     }
     
-    /* INPUTS: Flat, Modern, No Borders */
+    /* FLATTENED INPUTS */
     .stTextInput input, .stTextArea textarea, .stSelectbox div[data-baseweb="select"] {
         background-color: #2B2B2B !important; 
         color: #FFF !important;
@@ -37,58 +37,55 @@ st.markdown("""
         border-radius: 8px;
     }
     
-    /* CHROME REMOVAL */
+    /* HIDE CHROME */
     header[data-testid="stHeader"] {display: none;}
     #MainMenu {visibility: hidden;}
     footer {visibility: hidden;}
     .block-container {padding-top: 1.5rem; padding-bottom: 3rem;}
 
-    /* TABS: Text-Only, Minimal */
+    /* MINIMAL TABS */
     .stTabs [data-baseweb="tab-list"] {gap: 20px; border-bottom: 1px solid #333;}
-    .stTabs [data-baseweb="tab"] {height: 40px; background: transparent; color: #888; border: none; font-weight: 500;}
+    .stTabs [data-baseweb="tab"] {height: 40px; background: transparent; color: #888; border: none;}
     .stTabs [aria-selected="true"] {color: #FFF !important; border-bottom: 2px solid #FFF;}
 
-    /* BUTTONS: Subtle & Professional */
+    /* BUTTONS */
     .stButton button {
         background-color: #2B2B2B; color: #CCC; border: 1px solid #444; width: 100%; border-radius: 6px;
     }
     .stButton button:hover {border-color: #FFF; color: #FFF; background-color: #333;}
 
-    /* CHAT: Invisible Containers */
+    /* CHAT BUBBLES */
     .stChatMessage {background-color: transparent; border: none; padding: 5px 0;}
     [data-testid="stChatMessageAvatarUser"], [data-testid="stChatMessageAvatarAssistant"] {display: none !important;}
     
-    /* DATA EDITOR: Dark Mode Fix */
-    [data-testid="stDataFrame"] {border: 1px solid #333; border-radius: 8px;}
+    /* MODAL STYLE */
+    div[data-testid="stExpander"] {background-color: #252525; border-radius: 8px; border: 1px solid #333;}
 </style>
 """, unsafe_allow_html=True)
 
-# State Initialization
+# Session State
 if "user" not in st.session_state: st.session_state.user = None
 if "active_ws_id" not in st.session_state: st.session_state.active_ws_id = None
 if "chat_session" not in st.session_state: st.session_state.chat_session = None
 
 # ==============================================================================
-# 2. BACKEND CONNECTION (SUPABASE)
+# 2. BACKEND
 # ==============================================================================
 @st.cache_resource
 def init_supabase():
-    try:
-        return create_client(st.secrets["SUPABASE_URL"], st.secrets["SUPABASE_KEY"])
+    try: return create_client(st.secrets["SUPABASE_URL"], st.secrets["SUPABASE_KEY"])
     except: return None
 
 supabase = init_supabase()
-
-if not supabase:
-    st.error("🚨 SYSTEM FAILURE: Database connection refused. Check Secrets.")
-    st.stop()
+if not supabase: st.error("🚨 CRITICAL: Check Supabase Secrets."); st.stop()
 
 # ==============================================================================
-# 3. DATA CONTROLLER (The Brain)
+# 3. DATA LAYER
 # ==============================================================================
 class DB:
     @staticmethod
     def log_login(user_id):
+        # FEATURE: Login Audit Trail
         try: supabase.table("login_logs").insert({"user_id": user_id}).execute()
         except: pass
 
@@ -112,7 +109,6 @@ class DB:
             res = supabase.table("tasks").select("*").eq("workspace_id", ws_id).order("id", desc=True).execute()
             df = pd.DataFrame(res.data)
             if not df.empty:
-                # Type Enforcement for Streamlit Editors
                 df["id"] = pd.to_numeric(df["id"]).astype(int)
                 df["due_date"] = pd.to_datetime(df["due_date"], errors='coerce').dt.date
             return df
@@ -164,7 +160,7 @@ class DB:
         except: return []
 
 # ==============================================================================
-# 4. INTELLIGENCE (GEMINI AGENT)
+# 4. INTELLIGENCE
 # ==============================================================================
 def image_to_base64(image):
     buffered = BytesIO()
@@ -184,7 +180,6 @@ def extract_pdf(file):
 if "GOOGLE_API_KEY" in st.secrets:
     genai.configure(api_key=st.secrets["GOOGLE_API_KEY"])
     
-    # Tool: Schedule Task
     def add_task_tool(task_title: str, duration_minutes: int, due_date: str):
         """Adds a task. due_date must be 'YYYY-MM-DD'."""
         ws_id = st.session_state.active_ws_id
@@ -203,7 +198,7 @@ if "GOOGLE_API_KEY" in st.secrets:
 def ask_agent(msg, ctx, img=None):
     try:
         today = datetime.now().strftime("%Y-%m-%d")
-        prompt = [f"SYSTEM: Today is {today}. If user gives time (e.g. 7pm), put it in Title. USE TOOLS if scheduling.", f"CONTEXT:\n{ctx}", f"USER: {msg}"]
+        prompt = [f"SYSTEM: Today is {today}. If user gives time, put it in Title. USE TOOLS if scheduling.", f"CONTEXT:\n{ctx}", f"USER: {msg}"]
         if img: prompt.append(img)
         return st.session_state.chat_session.send_message(prompt).text
     except Exception as e: return f"AI Error: {e}"
@@ -231,7 +226,7 @@ def auth_view():
                     try:
                         res = supabase.auth.sign_in_with_password({"email":e,"password":p})
                         st.session_state.user = res.user
-                        DB.log_login(res.user.id)
+                        DB.log_login(res.user.id) # FEATURE: Logs login to DB
                         st.rerun()
                     except: st.error("Invalid Credentials")
         with tab2:
@@ -241,87 +236,61 @@ def auth_view():
                     try:
                         res = supabase.auth.sign_up({"email":e,"password":p})
                         st.session_state.user = res.user
-                        st.success("Created! Log in now."); st.rerun()
+                        st.success("Created! Login now."); st.rerun()
                     except: st.error("Signup failed.")
 
 def main_view():
     user = st.session_state.user
     
-    # --- AUTO-INIT: Ensure a workspace always exists ---
+    # --- WORKSPACE LOGIC ---
     workspaces = DB.get_workspaces(user.id)
-    if workspaces.empty:
-        new_id = DB.create_workspace(user.id, "General")
-        st.session_state.active_ws_id = new_id
-        st.rerun()
-
-    if st.session_state.active_ws_id is None and not workspaces.empty:
-        st.session_state.active_ws_id = int(workspaces.iloc[0]['id'])
-
+    
+    # Auto-Select Logic
     active_ws_id = st.session_state.active_ws_id
-    try:
-        active_ws_title = workspaces[workspaces['id'] == active_ws_id].iloc[0]['title']
-    except:
-        active_ws_title = "Workspace"
+    active_ws_title = "Start"
+    
+    if active_ws_id and not workspaces.empty:
+        row = workspaces[workspaces['id'] == active_ws_id]
+        if not row.empty: active_ws_title = row.iloc[0]['title']
+        else: st.session_state.active_ws_id = None
 
-    # --- SIDEBAR: NAVIGATION & I/O ---
+    # --- SIDEBAR ---
     with st.sidebar:
         st.markdown(f"**{user.email}**")
-        st.markdown("### 📂 Workspaces")
         
-        # 1. SWITCHER (Persistent Dropdown)
-        # Using a list allows us to find the index easily
-        options = workspaces['title'].tolist()
-        ids = workspaces['id'].tolist()
-        
-        # Safe index finding
-        current_index = 0
-        if active_ws_id in ids:
-            current_index = ids.index(active_ws_id)
-            
-        selected_title = st.selectbox(
-            "Select Workspace", 
-            options, 
-            index=current_index, 
-            label_visibility="collapsed"
-        )
-        
-        # Trigger Switch
-        selected_id = ids[options.index(selected_title)]
-        if selected_id != active_ws_id:
-            st.session_state.active_ws_id = selected_id
+        # 1. NEW CHAT / WORKSPACE BUTTON
+        if st.button("➕ New Chat", use_container_width=True, type="primary"):
+            st.session_state.active_ws_id = None
             st.rerun()
 
-        # 2. NEW WORKSPACE CREATOR
-        with st.popover("➕ New Workspace", use_container_width=True):
-            new_name = st.text_input("Name")
-            if st.button("Create"):
-                if new_name:
-                    new_id = DB.create_workspace(user.id, new_name)
-                    st.session_state.active_ws_id = new_id
-                    st.rerun()
+        st.markdown("### 🗂️ Notebooks")
         
-        st.markdown("---")
-        st.markdown("### 📄 Sources")
-        
-        # 3. SOURCE MANAGER
-        docs = DB.get_docs(active_ws_id)
-        if docs:
-            for d in docs:
-                c1, c2 = st.columns([4, 1])
-                c1.caption(f"{d['filename'][:15]}...")
-                if c2.button("×", key=f"del_{d['id']}"): DB.delete_doc(d['id']); st.rerun()
-        else:
-            st.caption("No sources attached.")
+        # Workspace Switcher
+        for i, row in workspaces.iterrows():
+            prefix = "🔹" if row['id'] == active_ws_id else "▫️"
+            if st.button(f"{prefix} {row['title']}", key=f"ws_{row['id']}"):
+                st.session_state.active_ws_id = row['id']
+                st.rerun()
+
+        if active_ws_id:
+            st.markdown("---")
+            st.markdown("### 📎 Context")
+            docs = DB.get_docs(active_ws_id)
+            if docs:
+                for d in docs:
+                    c1, c2 = st.columns([4, 1])
+                    c1.caption(f"{d['filename'][:15]}...")
+                    if c2.button("×", key=f"del_{d['id']}"): DB.delete_doc(d['id']); st.rerun()
+            else: st.caption("No files.")
             
-        with st.expander("Upload PDF/Image", expanded=True):
-            up_file = st.file_uploader("File", type=["pdf", "png", "jpg"], label_visibility="collapsed")
-            if up_file:
-                if up_file.type == "application/pdf":
-                    if st.button("Index PDF", use_container_width=True):
-                        txt = extract_pdf(up_file)
-                        if txt: DB.save_doc(user.id, active_ws_id, up_file.name, txt); st.toast("Indexed!"); st.rerun()
-                else:
-                    st.image(Image.open(up_file), width=100)
+            with st.expander("Upload"):
+                up_file = st.file_uploader("File", type=["pdf", "png", "jpg"], label_visibility="collapsed")
+                if up_file:
+                    if up_file.type == "application/pdf":
+                        if st.button("Index PDF", use_container_width=True):
+                            txt = extract_pdf(up_file)
+                            if txt: DB.save_doc(user.id, active_ws_id, up_file.name, txt); st.toast("Indexed!"); st.rerun()
+                    else: st.image(Image.open(up_file), width=100)
 
         st.markdown("---")
         if st.button("Log Out", use_container_width=True):
@@ -329,7 +298,26 @@ def main_view():
             st.session_state.user = None
             st.rerun()
 
-    # --- MAIN CANVAS (SPLIT VIEW) ---
+    # --- MAIN CONTENT ---
+    
+    # STATE: NO WORKSPACE SELECTED (The "Gemini Home" Screen)
+    if not active_ws_id:
+        st.markdown("<br><br>", unsafe_allow_html=True)
+        st.markdown("<h1 style='text-align: center; font-size: 3rem;'>Good morning.</h1>", unsafe_allow_html=True)
+        st.markdown("<p style='text-align: center; color: #888;'>What project are we working on?</p>", unsafe_allow_html=True)
+        
+        c1, c2, c3 = st.columns([1, 2, 1])
+        with c2:
+            with st.form("create_ws_form"):
+                new_title = st.text_input("Project Name", placeholder="e.g. Physics Project...", label_visibility="collapsed")
+                if st.form_submit_button("Start Workspace", use_container_width=True, type="primary"):
+                    if new_title:
+                        new_id = DB.create_workspace(user.id, new_title)
+                        st.session_state.active_ws_id = new_id
+                        st.rerun()
+        st.stop()
+
+    # STATE: ACTIVE WORKSPACE (The "Studio" Screen)
     col_chat, col_studio = st.columns([1, 1.4], gap="medium")
 
     # === LEFT: CHAT ===
@@ -370,8 +358,7 @@ def main_view():
         st.markdown("### 🛠️ Studio")
         t1, t2, t3 = st.tabs(["Plan", "Map", "Brief"])
 
-        # 1. CALENDAR & GRID
-        with t1:
+        with t1: # Plan
             tasks = DB.get_tasks(active_ws_id)
             if not tasks.empty:
                 cal_events = []
@@ -387,7 +374,7 @@ def main_view():
                     column_config={
                         "id": None, "user_id": None, "workspace_id": None, "created_at": None, "est_minutes": None,
                         "title": st.column_config.TextColumn("Task"),
-                        "due_date": st.column_config.DateColumn("Due Date"),
+                        "due_date": st.column_config.DateColumn("Due"),
                         "status": st.column_config.SelectboxColumn("Status", options=["todo", "done"])
                     }
                 )
@@ -400,10 +387,9 @@ def main_view():
                     for i in st.session_state[f"ed_{active_ws_id}"]["deleted_rows"]:
                         DB.delete_task(tasks.iloc[i]["id"])
                     st.rerun()
-            else: st.info("No tasks in this workspace.")
+            else: st.info("No active tasks.")
 
-        # 2. MIND MAP
-        with t2:
+        with t2: # Map
             if st.button("Generate Graph", use_container_width=True):
                 docs = DB.get_docs(active_ws_id)
                 txt = "".join([d['content'][:10000] for d in docs])
@@ -414,8 +400,7 @@ def main_view():
                         else: st.error("Failed")
                 else: st.warning("Upload PDF first")
 
-        # 3. SUMMARY
-        with t3:
+        with t3: # Brief
             if st.button("Synthesize", use_container_width=True):
                 docs = DB.get_docs(active_ws_id)
                 txt = "".join([d['content'][:15000] for d in docs])
