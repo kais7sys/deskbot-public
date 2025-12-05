@@ -13,11 +13,11 @@ from datetime import datetime, date
 import graphviz
 
 # ==============================================================================
-# 1. UI ARCHITECTURE (CSS OVERRIDES)
+# 1. SYSTEM CONFIGURATION & UI OVERRIDE
 # ==============================================================================
-st.set_page_config(page_title="DeskBot", page_icon="⚡", layout="wide", initial_sidebar_state="expanded")
+st.set_page_config(page_title="DeskBot // Workspace", page_icon="⚡", layout="wide", initial_sidebar_state="expanded")
 
-# This CSS mimics the Notion Dark Mode UI by overriding Streamlit defaults
+# Injecting Industrial-Grade CSS to force the Notion Look
 st.markdown("""
 <style>
     /* 1. NOTION DARK THEME BACKGROUND */
@@ -245,7 +245,8 @@ def auth_view():
 def main_view():
     user = st.session_state.user
     
-    # --- AUTO-CREATE DEFAULT WORKSPACE IF NONE EXIST ---
+    # --- 🧠 CRITICAL FIX: AUTO-CREATE WORKSPACE ---
+    # This block ensures the dropdown NEVER appears empty
     workspaces = DB.get_workspaces(user.id)
     if workspaces.empty:
         new_id = DB.create_workspace(user.id, "General")
@@ -256,7 +257,11 @@ def main_view():
         st.session_state.active_ws_id = int(workspaces.iloc[0]['id'])
 
     active_ws_id = st.session_state.active_ws_id
-    active_ws_title = workspaces[workspaces['id'] == active_ws_id].iloc[0]['title']
+    # Safety check for title
+    if not workspaces[workspaces['id'] == active_ws_id].empty:
+        active_ws_title = workspaces[workspaces['id'] == active_ws_id].iloc[0]['title']
+    else:
+        active_ws_title = "Workspace"
 
     # --- SIDEBAR (NAVIGATION) ---
     with st.sidebar:
