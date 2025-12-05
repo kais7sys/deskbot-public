@@ -13,11 +13,10 @@ from datetime import datetime, date
 import graphviz
 
 # ==============================================================================
-# 1. SYSTEM CONFIGURATION & UI OVERRIDE
+# 1. VISUAL ARCHITECTURE (CSS OVERRIDES)
 # ==============================================================================
 st.set_page_config(page_title="DeskBot // Workspace", page_icon="⚡", layout="wide", initial_sidebar_state="expanded")
 
-# Aggressive CSS to force the Notion/Gemini look
 st.markdown("""
 <style>
     /* GLOBAL THEME */
@@ -29,7 +28,7 @@ st.markdown("""
         border-right: 1px solid #2F2F2F;
     }
     
-    /* FLATTENED INPUTS */
+    /* INPUTS */
     .stTextInput input, .stTextArea textarea, .stSelectbox div[data-baseweb="select"] {
         background-color: #2B2B2B !important; 
         color: #FFF !important;
@@ -43,7 +42,7 @@ st.markdown("""
     footer {visibility: hidden;}
     .block-container {padding-top: 1.5rem; padding-bottom: 3rem;}
 
-    /* MINIMAL TABS */
+    /* TABS */
     .stTabs [data-baseweb="tab-list"] {gap: 20px; border-bottom: 1px solid #333;}
     .stTabs [data-baseweb="tab"] {height: 40px; background: transparent; color: #888; border: none;}
     .stTabs [aria-selected="true"] {color: #FFF !important; border-bottom: 2px solid #FFF;}
@@ -58,8 +57,14 @@ st.markdown("""
     .stChatMessage {background-color: transparent; border: none; padding: 5px 0;}
     [data-testid="stChatMessageAvatarUser"], [data-testid="stChatMessageAvatarAssistant"] {display: none !important;}
     
-    /* MODAL STYLE */
-    div[data-testid="stExpander"] {background-color: #252525; border-radius: 8px; border: 1px solid #333;}
+    /* SETTINGS MODAL OVERLAY */
+    .settings-container {
+        background-color: #252525;
+        padding: 20px;
+        border-radius: 12px;
+        border: 1px solid #333;
+        margin-bottom: 20px;
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -67,7 +72,7 @@ st.markdown("""
 if "user" not in st.session_state: st.session_state.user = None
 if "active_ws_id" not in st.session_state: st.session_state.active_ws_id = None
 if "chat_session" not in st.session_state: st.session_state.chat_session = None
-if "user_settings" not in st.session_state: st.session_state.user_settings = {}
+if "show_settings" not in st.session_state: st.session_state.show_settings = False
 
 # ==============================================================================
 # 2. BACKEND
@@ -84,29 +89,18 @@ if not supabase: st.error("🚨 CRITICAL: Check Supabase Secrets."); st.stop()
 # 3. DATA LAYER
 # ==============================================================================
 class DB:
-    # --- SETTINGS MANAGEMENT ---
-    @staticmethod
-    def get_settings(user_id):
-        try:
-            res = supabase.table("user_settings").select("*").eq("user_id", user_id).execute()
-            if res.data: return res.data[0]
-            else: return {}
-        except: return {}
-
-    @staticmethod
-    def save_settings(user_id, name, title, instructions):
-        try:
-            # Upsert (Insert or Update)
-            data = {"user_id": user_id, "display_name": name, "job_title": title, "custom_instructions": instructions}
-            supabase.table("user_settings").upsert(data).execute()
-            return True
-        except: return False
-
-    # --- CORE ---
     @staticmethod
     def log_login(user_id):
         try: supabase.table("login_logs").insert({"user_id": user_id}).execute()
         except: pass
+
+    @staticmethod
+    def get_login_history(user_id):
+        # FETCH AUDIT LOGS
+        try:
+            res = supabase.table("login_logs").select("*").eq("user_id", user_id).order("login_timestamp", desc=True).limit(10).execute()
+            return pd.DataFrame(res.data)
+        except: return pd.DataFrame()
 
     @staticmethod
     def get_workspaces(user_id):
@@ -179,7 +173,7 @@ class DB:
         except: return []
 
 # ==============================================================================
-# 4. INTELLIGENCE (PERSONALIZED)
+# 4. INTELLIGENCE
 # ==============================================================================
 def image_to_base64(image):
     buffered = BytesIO()
@@ -217,23 +211,7 @@ if "GOOGLE_API_KEY" in st.secrets:
 def ask_agent(msg, ctx, img=None):
     try:
         today = datetime.now().strftime("%Y-%m-%d")
-        
-        # --- PERSONALIZATION INJECTION ---
-        settings = st.session_state.user_settings
-        user_name = settings.get('display_name', 'User')
-        user_context = settings.get('custom_instructions', '')
-        
-        system_msg = f"""
-        SYSTEM: You are DeskBot. Date: {today}. 
-        User Name: {user_name}.
-        Custom Instructions: {user_context}
-        
-        STRICT RULES:
-        1. If user gives time (e.g. 7pm), put it in Title. 
-        2. USE TOOLS if scheduling.
-        """
-        
-        prompt = [system_msg, f"CONTEXT:\n{ctx}", f"USER: {msg}"]
+        prompt = [f"SYSTEM: Today is {today}. If user gives time, put it in Title. USE TOOLS if scheduling.", f"CONTEXT:\n{ctx}", f"USER: {msg}"]
         if img: prompt.append(img)
         return st.session_state.chat_session.send_message(prompt).text
     except Exception as e: return f"AI Error: {e}"
@@ -262,8 +240,6 @@ def auth_view():
                         res = supabase.auth.sign_in_with_password({"email":e,"password":p})
                         st.session_state.user = res.user
                         DB.log_login(res.user.id)
-                        # Load settings on login
-                        st.session_state.user_settings = DB.get_settings(res.user.id)
                         st.rerun()
                     except: st.error("Invalid Credentials")
         with tab2:
@@ -273,13 +249,38 @@ def auth_view():
                     try:
                         res = supabase.auth.sign_up({"email":e,"password":p})
                         st.session_state.user = res.user
-                        st.success("Created! Log in now."); st.rerun()
+                        st.success("Created! Login now."); st.rerun()
                     except: st.error("Signup failed.")
+
+def settings_view(user):
+    st.markdown("### ⚙️ Settings & Security")
+    
+    with st.container():
+        st.write("#### 👤 User Profile")
+        st.code(f"ID: {user.id}\nEmail: {user.email}")
+        
+        st.write("#### 🛡️ Login Audit Log (Last 10)")
+        logs = DB.get_login_history(user.id)
+        if not logs.empty:
+            # Clean up the dataframe for display
+            logs['login_timestamp'] = pd.to_datetime(logs['login_timestamp']).dt.strftime('%Y-%m-%d %H:%M:%S')
+            st.dataframe(logs[['login_timestamp']], use_container_width=True, hide_index=True)
+        else:
+            st.caption("No logs available.")
+            
+        if st.button("Close Settings", type="primary"):
+            st.session_state.show_settings = False
+            st.rerun()
 
 def main_view():
     user = st.session_state.user
     
-    # Auto-Init Workspace
+    # --- SETTINGS OVERLAY ---
+    if st.session_state.show_settings:
+        settings_view(user)
+        st.stop() # Halt main rendering to show settings
+
+    # --- AUTO-INIT ---
     workspaces = DB.get_workspaces(user.id)
     if workspaces.empty:
         new_id = DB.create_workspace(user.id, "General")
@@ -292,20 +293,21 @@ def main_view():
     active_ws_id = st.session_state.active_ws_id
     try:
         active_ws_title = workspaces[workspaces['id'] == active_ws_id].iloc[0]['title']
-    except: active_ws_title = "Workspace"
+    except:
+        active_ws_title = "Workspace"
 
     # --- SIDEBAR ---
     with st.sidebar:
-        # User Profile Header
-        s_name = st.session_state.user_settings.get("display_name", user.email.split("@")[0])
-        st.markdown(f"**👤 {s_name}**")
+        st.markdown(f"**{user.email}**")
         
-        # New Chat / Workspace
+        # 1. NEW CHAT
         if st.button("➕ New Chat", use_container_width=True, type="primary"):
             st.session_state.active_ws_id = None
             st.rerun()
 
-        st.markdown("### 🗂️ Projects")
+        st.markdown("### 🗂️ Notebooks")
+        
+        # Switcher
         for i, row in workspaces.iterrows():
             prefix = "🔹" if row['id'] == active_ws_id else "▫️"
             if st.button(f"{prefix} {row['title']}", key=f"ws_{row['id']}"):
@@ -321,6 +323,7 @@ def main_view():
                     c1, c2 = st.columns([4, 1])
                     c1.caption(f"{d['filename'][:15]}...")
                     if c2.button("×", key=f"del_{d['id']}"): DB.delete_doc(d['id']); st.rerun()
+            else: st.caption("No sources.")
             
             with st.expander("Upload"):
                 up_file = st.file_uploader("File", type=["pdf", "png", "jpg"], label_visibility="collapsed")
@@ -332,44 +335,28 @@ def main_view():
                     else: st.image(Image.open(up_file), width=100)
 
         st.markdown("---")
-        
-        # --- SETTINGS MODAL TRIGGER ---
+        # SETTINGS TRIGGER
         if st.button("⚙️ Settings", use_container_width=True):
             st.session_state.show_settings = True
-
-        if st.button("Log Out", use_container_width=True): 
+            st.rerun()
+            
+        if st.button("Log Out", use_container_width=True):
             supabase.auth.sign_out()
             st.session_state.user = None
             st.rerun()
 
-    # --- SETTINGS MODAL ---
-    if st.session_state.get("show_settings"):
-        with st.expander("⚙️ Preferences", expanded=True):
-            with st.form("settings_form"):
-                new_name = st.text_input("Display Name", value=st.session_state.user_settings.get("display_name", ""))
-                new_role = st.text_input("Job Title / Role", value=st.session_state.user_settings.get("job_title", ""))
-                new_instr = st.text_area("Custom AI Instructions", value=st.session_state.user_settings.get("custom_instructions", ""), placeholder="e.g. Be extremely concise. Talk like JARVIS.")
-                
-                if st.form_submit_button("Save Preferences"):
-                    if DB.save_settings(user.id, new_name, new_role, new_instr):
-                        st.session_state.user_settings = DB.get_settings(user.id)
-                        st.success("Saved!")
-                        st.session_state.show_settings = False
-                        time.sleep(1); st.rerun()
-
     # --- MAIN CONTENT ---
     
-    # 1. EMPTY STATE (New Chat)
+    # STATE: NO WORKSPACE (New Chat)
     if not active_ws_id:
         st.markdown("<br><br>", unsafe_allow_html=True)
-        s_name = st.session_state.user_settings.get("display_name", "User")
-        st.markdown(f"<h1 style='text-align: center; font-size: 3rem;'>Hello, {s_name}.</h1>", unsafe_allow_html=True)
-        st.markdown("<p style='text-align: center; color: #888;'>What are we building today?</p>", unsafe_allow_html=True)
+        st.markdown("<h1 style='text-align: center; font-size: 3rem;'>Good morning.</h1>", unsafe_allow_html=True)
+        st.markdown("<p style='text-align: center; color: #888;'>What project are we working on?</p>", unsafe_allow_html=True)
         
         c1, c2, c3 = st.columns([1, 2, 1])
         with c2:
             with st.form("create_ws_form"):
-                new_title = st.text_input("Project Name", placeholder="e.g. Physics Final...", label_visibility="collapsed")
+                new_title = st.text_input("Project Name", placeholder="e.g. Physics Project...", label_visibility="collapsed")
                 if st.form_submit_button("Start Workspace", use_container_width=True, type="primary"):
                     if new_title:
                         new_id = DB.create_workspace(user.id, new_title)
@@ -377,7 +364,7 @@ def main_view():
                         st.rerun()
         st.stop()
 
-    # 2. ACTIVE WORKSPACE
+    # STATE: ACTIVE WORKSPACE
     col_chat, col_studio = st.columns([1, 1.4], gap="medium")
 
     # === LEFT: CHAT ===
@@ -387,7 +374,7 @@ def main_view():
         
         with chat_cont:
             history = DB.get_chat(active_ws_id)
-            if not history: st.info(f"Workspace ready. Custom instructions active.")
+            if not history: st.info("Workspace ready.")
             for msg in history:
                 with st.chat_message(msg["role"]):
                     if msg.get("image_data"):
@@ -418,7 +405,8 @@ def main_view():
         st.markdown("### 🛠️ Studio")
         t1, t2, t3 = st.tabs(["Plan", "Map", "Brief"])
 
-        with t1: # Plan
+        # 1. CALENDAR & GRID
+        with t1:
             tasks = DB.get_tasks(active_ws_id)
             if not tasks.empty:
                 cal_events = []
@@ -438,6 +426,7 @@ def main_view():
                         "status": st.column_config.SelectboxColumn("Status", options=["todo", "done"])
                     }
                 )
+                # Auto-Save Logic
                 if st.session_state[f"ed_{active_ws_id}"]["edited_rows"]:
                     for i, u in st.session_state[f"ed_{active_ws_id}"]["edited_rows"].items():
                         if "due_date" in u and u["due_date"]: u["due_date"] = u["due_date"].strftime('%Y-%m-%d')
@@ -449,7 +438,8 @@ def main_view():
                     st.rerun()
             else: st.info("No tasks in this workspace.")
 
-        with t2: # Map
+        # 2. MIND MAP
+        with t2:
             if st.button("Generate Graph", use_container_width=True):
                 docs = DB.get_docs(active_ws_id)
                 txt = "".join([d['content'][:10000] for d in docs])
@@ -460,7 +450,8 @@ def main_view():
                         else: st.error("Failed")
                 else: st.warning("Upload PDF first")
 
-        with t3: # Brief
+        # 3. SUMMARY
+        with t3:
             if st.button("Synthesize", use_container_width=True):
                 docs = DB.get_docs(active_ws_id)
                 txt = "".join([d['content'][:15000] for d in docs])
