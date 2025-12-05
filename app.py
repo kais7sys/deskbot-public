@@ -242,28 +242,41 @@ def auth_view():
 def main_view():
     user = st.session_state.user
     
-    # --- WORKSPACE LOGIC ---
+    # --- AUTO-INIT: Ensure a workspace always exists ---
     workspaces = DB.get_workspaces(user.id)
-    
-    # Auto-Select Logic
-    active_ws_id = st.session_state.active_ws_id
-    active_ws_title = "Start"
-    
-    if active_ws_id and not workspaces.empty:
-        row = workspaces[workspaces['id'] == active_ws_id]
-        if not row.empty: active_ws_title = row.iloc[0]['title']
-        else: st.session_state.active_ws_id = None
+    if workspaces.empty:
+        new_id = DB.create_workspace(user.id, "General")
+        st.session_state.active_ws_id = new_id
+        st.rerun()
 
-    # --- SIDEBAR ---
+    if st.session_state.active_ws_id is None and not workspaces.empty:
+        st.session_state.active_ws_id = int(workspaces.iloc[0]['id'])
+
+    active_ws_id = st.session_state.active_ws_id
+    try:
+        active_ws_title = workspaces[workspaces['id'] == active_ws_id].iloc[0]['title']
+    except:
+        active_ws_title = "Workspace"
+
+    # --- SIDEBAR: NAVIGATION & I/O ---
     with st.sidebar:
         st.markdown(f"**{user.email}**")
         
-        # 1. NEW CHAT / WORKSPACE BUTTON
-        if st.button("➕ New Chat", use_container_width=True, type="primary"):
-            st.session_state.active_ws_id = None
-            st.rerun()
+        # 1. NEW WORKSPACE BUTTON
+        if st.button("➕ New Workspace", use_container_width=True, type="primary"):
+            st.session_state.show_create_modal = True
 
-        st.markdown("### 🗂️ Notebooks")
+        if st.session_state.get("show_create_modal"):
+            with st.form("new_ws"):
+                title = st.text_input("Name")
+                if st.form_submit_button("Create"):
+                    if title:
+                        new_id = DB.create_workspace(user.id, title)
+                        st.session_state.active_ws_id = new_id
+                        st.session_state.show_create_modal = False
+                        st.rerun()
+
+        st.markdown("### 📂 Workspaces")
         
         # Workspace Switcher
         for i, row in workspaces.iterrows():
@@ -272,16 +285,18 @@ def main_view():
                 st.session_state.active_ws_id = row['id']
                 st.rerun()
 
+        st.markdown("---")
+        st.markdown("### 📄 Sources")
+        
         if active_ws_id:
-            st.markdown("---")
-            st.markdown("### 📎 Context")
             docs = DB.get_docs(active_ws_id)
             if docs:
                 for d in docs:
                     c1, c2 = st.columns([4, 1])
                     c1.caption(f"{d['filename'][:15]}...")
                     if c2.button("×", key=f"del_{d['id']}"): DB.delete_doc(d['id']); st.rerun()
-            else: st.caption("No files.")
+            else:
+                st.caption("No sources.")
             
             with st.expander("Upload"):
                 up_file = st.file_uploader("File", type=["pdf", "png", "jpg"], label_visibility="collapsed")
@@ -290,7 +305,8 @@ def main_view():
                         if st.button("Index PDF", use_container_width=True):
                             txt = extract_pdf(up_file)
                             if txt: DB.save_doc(user.id, active_ws_id, up_file.name, txt); st.toast("Indexed!"); st.rerun()
-                    else: st.image(Image.open(up_file), width=100)
+                    else:
+                        st.image(Image.open(up_file), width=100)
 
         st.markdown("---")
         if st.button("Log Out", use_container_width=True):
@@ -298,26 +314,7 @@ def main_view():
             st.session_state.user = None
             st.rerun()
 
-    # --- MAIN CONTENT ---
-    
-    # STATE: NO WORKSPACE SELECTED (The "Gemini Home" Screen)
-    if not active_ws_id:
-        st.markdown("<br><br>", unsafe_allow_html=True)
-        st.markdown("<h1 style='text-align: center; font-size: 3rem;'>Good morning.</h1>", unsafe_allow_html=True)
-        st.markdown("<p style='text-align: center; color: #888;'>What project are we working on?</p>", unsafe_allow_html=True)
-        
-        c1, c2, c3 = st.columns([1, 2, 1])
-        with c2:
-            with st.form("create_ws_form"):
-                new_title = st.text_input("Project Name", placeholder="e.g. Physics Project...", label_visibility="collapsed")
-                if st.form_submit_button("Start Workspace", use_container_width=True, type="primary"):
-                    if new_title:
-                        new_id = DB.create_workspace(user.id, new_title)
-                        st.session_state.active_ws_id = new_id
-                        st.rerun()
-        st.stop()
-
-    # STATE: ACTIVE WORKSPACE (The "Studio" Screen)
+    # --- MAIN CANVAS (SPLIT VIEW) ---
     col_chat, col_studio = st.columns([1, 1.4], gap="medium")
 
     # === LEFT: CHAT ===
@@ -358,7 +355,8 @@ def main_view():
         st.markdown("### 🛠️ Studio")
         t1, t2, t3 = st.tabs(["Plan", "Map", "Brief"])
 
-        with t1: # Plan
+        # 1. CALENDAR & GRID
+        with t1:
             tasks = DB.get_tasks(active_ws_id)
             if not tasks.empty:
                 cal_events = []
@@ -374,10 +372,11 @@ def main_view():
                     column_config={
                         "id": None, "user_id": None, "workspace_id": None, "created_at": None, "est_minutes": None,
                         "title": st.column_config.TextColumn("Task"),
-                        "due_date": st.column_config.DateColumn("Due"),
+                        "due_date": st.column_config.DateColumn("Due Date"),
                         "status": st.column_config.SelectboxColumn("Status", options=["todo", "done"])
                     }
                 )
+                # Auto-Save Logic
                 if st.session_state[f"ed_{active_ws_id}"]["edited_rows"]:
                     for i, u in st.session_state[f"ed_{active_ws_id}"]["edited_rows"].items():
                         if "due_date" in u and u["due_date"]: u["due_date"] = u["due_date"].strftime('%Y-%m-%d')
@@ -387,9 +386,10 @@ def main_view():
                     for i in st.session_state[f"ed_{active_ws_id}"]["deleted_rows"]:
                         DB.delete_task(tasks.iloc[i]["id"])
                     st.rerun()
-            else: st.info("No active tasks.")
+            else: st.info("No tasks in this workspace.")
 
-        with t2: # Map
+        # 2. MIND MAP
+        with t2:
             if st.button("Generate Graph", use_container_width=True):
                 docs = DB.get_docs(active_ws_id)
                 txt = "".join([d['content'][:10000] for d in docs])
@@ -400,7 +400,8 @@ def main_view():
                         else: st.error("Failed")
                 else: st.warning("Upload PDF first")
 
-        with t3: # Brief
+        # 3. SUMMARY
+        with t3:
             if st.button("Synthesize", use_container_width=True):
                 docs = DB.get_docs(active_ws_id)
                 txt = "".join([d['content'][:15000] for d in docs])
