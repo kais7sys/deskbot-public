@@ -15,9 +15,9 @@ import graphviz
 # ==============================================================================
 # 1. SYSTEM CONFIGURATION & UI OVERRIDE
 # ==============================================================================
-st.set_page_config(page_title="DeskBot // Workspace", page_icon="⚡", layout="wide", initial_sidebar_state="expanded")
+st.set_page_config(page_title="DeskBot", page_icon="⚡", layout="wide", initial_sidebar_state="expanded")
 
-# Aggressive CSS to force the Notion/Studio look
+# Aggressive CSS to force the Notion/Gemini look
 st.markdown("""
 <style>
     /* GLOBAL THEME */
@@ -34,7 +34,7 @@ st.markdown("""
         background-color: #2B2B2B !important; 
         color: #FFF !important;
         border: 1px solid #3F3F3F !important; 
-        border-radius: 6px;
+        border-radius: 8px;
     }
     
     /* HIDE STREAMLIT CHROME */
@@ -50,13 +50,19 @@ st.markdown("""
 
     /* BUTTONS */
     .stButton button {
-        background-color: #2B2B2B; color: #CCC; border: 1px solid #444; width: 100%;
+        background-color: #2B2B2B; color: #CCC; border: 1px solid #444; width: 100%; border-radius: 8px;
     }
     .stButton button:hover {border-color: #FFF; color: #FFF;}
 
     /* CHAT UI */
     .stChatMessage {background-color: transparent; border: none;}
     [data-testid="stChatMessageAvatarUser"], [data-testid="stChatMessageAvatarAssistant"] {display: none !important;}
+    
+    /* HERO INPUT (New Workspace) */
+    .hero-input input {
+        font-size: 20px !important;
+        padding: 15px !important;
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -242,102 +248,104 @@ def auth_view():
 def main_view():
     user = st.session_state.user
     
-    # --- SELF-HEALING: Auto-Create Workspace ---
+    # --- LOGIC: WORKSPACE LOADING ---
     workspaces = DB.get_workspaces(user.id)
-    if workspaces.empty:
-        # If the DB is empty, we create the first workspace IMMEDIATELY
-        new_id = DB.create_workspace(user.id, "General")
-        st.session_state.active_ws_id = new_id
-        st.rerun()
-
-    # --- SELF-HEALING: Fix Invalid Selection ---
-    # If session state has an ID that doesn't exist in the DF (e.g. after deletion), reset.
-    valid_ids = workspaces['id'].tolist()
-    if st.session_state.active_ws_id not in valid_ids:
-         st.session_state.active_ws_id = valid_ids[0]
-
+    
+    # If a workspace is active, load its data
     active_ws_id = st.session_state.active_ws_id
-    # Safe Get Title
-    try:
-        active_ws_title = workspaces[workspaces['id'] == active_ws_id].iloc[0]['title']
-    except:
-        active_ws_title = "Workspace"
+    active_ws_title = "Start"
+    
+    if active_ws_id and not workspaces.empty:
+        # Validate ID exists
+        row = workspaces[workspaces['id'] == active_ws_id]
+        if not row.empty:
+            active_ws_title = row.iloc[0]['title']
+        else:
+            st.session_state.active_ws_id = None # Reset if invalid
 
-    # --- SIDEBAR ---
+    # --- SIDEBAR (NAVIGATION) ---
     with st.sidebar:
         st.markdown(f"**{user.email}**")
         
-        # 1. WORKSPACE SWITCHER (Always Visible)
-        st.markdown("### 📂 Workspaces")
-        
-        # Manual Dropdown for clarity
-        options = workspaces['title'].tolist()
-        ids = workspaces['id'].tolist()
-        current_index = ids.index(active_ws_id) if active_ws_id in ids else 0
-        
-        selected_title = st.selectbox(
-            "Select Workspace", 
-            options, 
-            index=current_index, 
-            label_visibility="collapsed"
-        )
-        
-        # Update State on Change
-        selected_id = ids[options.index(selected_title)]
-        if selected_id != active_ws_id:
-            st.session_state.active_ws_id = selected_id
+        # 1. NEW CHAT BUTTON (Gemini Style)
+        # This resets the active ID, triggering the "Hero Input" screen
+        if st.button("➕ New Chat", use_container_width=True, type="primary"):
+            st.session_state.active_ws_id = None
             st.rerun()
 
-        # New Workspace Creator
-        with st.popover("➕ New Workspace", use_container_width=True):
-            new_name = st.text_input("Name")
-            if st.button("Create"):
-                if new_name:
-                    new_id = DB.create_workspace(user.id, new_name)
-                    st.session_state.active_ws_id = new_id
-                    st.rerun()
+        st.markdown("### 🗂️ Recent")
+        
+        # Workspace List
+        for i, row in workspaces.iterrows():
+            # Styling selected vs unselected
+            prefix = "🔹" if row['id'] == active_ws_id else "▫️"
+            if st.button(f"{prefix} {row['title']}", key=f"ws_{row['id']}"):
+                st.session_state.active_ws_id = row['id']
+                st.rerun()
 
-        st.divider()
-        
-        # 2. UPLOAD SECTION (Always Visible)
-        st.markdown("### 📄 Sources")
-        
-        docs = DB.get_docs(active_ws_id)
-        if docs:
-            for d in docs:
-                c1, c2 = st.columns([5,1])
-                c1.caption(f"📄 {d['filename'][:18]}...")
-                if c2.button("×", key=f"del_{d['id']}"): DB.delete_doc(d['id']); st.rerun()
-        else:
-            st.caption("No sources attached.")
-        
-        with st.expander("Upload PDF/Image", expanded=True):
-            up_file = st.file_uploader("File", type=["pdf", "png", "jpg"], label_visibility="collapsed")
-            if up_file:
-                if up_file.type == "application/pdf":
-                    if st.button("Index PDF", use_container_width=True):
-                        txt = extract_pdf(up_file)
-                        if txt: DB.save_doc(user.id, active_ws_id, up_file.name, txt); st.toast("Indexed!"); st.rerun()
-                else:
-                    st.image(Image.open(up_file), width=100)
+        if active_ws_id:
+            st.markdown("---")
+            st.markdown("### 📎 Context")
+            
+            docs = DB.get_docs(active_ws_id)
+            if docs:
+                for d in docs:
+                    c1, c2 = st.columns([5,1])
+                    c1.caption(f"{d['filename'][:15]}...")
+                    if c2.button("×", key=f"del_{d['id']}"): DB.delete_doc(d['id']); st.rerun()
+            else:
+                st.caption("No files attached.")
+            
+            with st.expander("Upload"):
+                up_file = st.file_uploader("File", type=["pdf", "png", "jpg"], label_visibility="collapsed")
+                if up_file:
+                    if up_file.type == "application/pdf":
+                        if st.button("Index PDF", use_container_width=True):
+                            txt = extract_pdf(up_file)
+                            if txt: DB.save_doc(user.id, active_ws_id, up_file.name, txt); st.toast("Indexed!"); st.rerun()
+                    else:
+                        st.image(Image.open(up_file), width=100)
 
-        st.divider()
-        if st.button("Log Out", use_container_width=True):
+        st.markdown("---")
+        if st.button("⚙️ Settings"): st.toast("Settings")
+        if st.button("Log Out"): 
             supabase.auth.sign_out()
             st.session_state.user = None
             st.rerun()
 
-    # --- MAIN LAYOUT ---
+    # --- MAIN CONTENT SWITCHER ---
+    
+    # CASE 1: NO WORKSPACE SELECTED (The "Gemini Empty State")
+    if not active_ws_id:
+        st.markdown("<br><br><br>", unsafe_allow_html=True)
+        st.markdown("<h1 style='text-align: center; font-size: 3rem;'>Good morning, User.</h1>", unsafe_allow_html=True)
+        st.markdown("<p style='text-align: center; color: #888;'>What would you like to work on today?</p>", unsafe_allow_html=True)
+        
+        # Big Center Input
+        c1, c2, c3 = st.columns([1, 2, 1])
+        with c2:
+            with st.form("create_ws_form"):
+                new_title = st.text_input("Project Name", placeholder="e.g. Physics Homework, Marketing Plan...", label_visibility="collapsed")
+                if st.form_submit_button("Start Workspace", use_container_width=True, type="primary"):
+                    if new_title:
+                        new_id = DB.create_workspace(user.id, new_title)
+                        st.session_state.active_ws_id = new_id
+                        st.rerun()
+        st.stop() # Stop rendering the rest of the app
+
+    # CASE 2: ACTIVE WORKSPACE (The Studio)
+    
+    # Split Layout
     col_chat, col_studio = st.columns([1, 1.4], gap="medium")
 
     # === LEFT: CHAT ===
     with col_chat:
         st.markdown(f"### 💬 {active_ws_title}")
-        chat_box = st.container(height=600)
+        chat_cont = st.container(height=600)
         
-        with chat_box:
+        with chat_cont:
             history = DB.get_chat(active_ws_id)
-            if not history: st.info("System ready.")
+            if not history: st.info("Workspace ready.")
             for msg in history:
                 with st.chat_message(msg["role"]):
                     if msg.get("image_data"):
@@ -376,7 +384,7 @@ def main_view():
                 for _, r in tasks.iterrows():
                     if r['due_date']:
                         color = "#2ecc71" if r['status']=='done' else "#3498db"
-                        cal_events.append({"title": r['title'], "start": str(r['due_date']), "allDay": True, "backgroundColor": color})
+                        cal_events.append({"title": r['title'], "start": r['due_date'], "allDay": True, "backgroundColor": color})
                 calendar(events=cal_events, options={"headerToolbar": {"left": "prev,next", "center": "title", "right": "dayGridMonth"}, "height": 350})
                 
                 st.divider()
@@ -419,7 +427,7 @@ def main_view():
                 docs = DB.get_docs(active_ws_id)
                 txt = "".join([d['content'][:15000] for d in docs])
                 if txt:
-                    with st.spinner("Computing..."):
+                    with st.spinner("Summarizing..."):
                         s = ask_agent("Executive Summary", txt)
                         st.markdown(s)
                 else: st.warning("Upload PDF first")
