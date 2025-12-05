@@ -1,3 +1,4 @@
+
 import streamlit as st
 import pandas as pd
 import google.generativeai as genai
@@ -13,55 +14,47 @@ from datetime import datetime, date
 import graphviz
 
 # ==============================================================================
-# 1. SYSTEM CONFIGURATION & UI OVERRIDE
+# 1. SYSTEM CONFIGURATION & CSS OVERRIDES (The "Notion" Look)
 # ==============================================================================
-st.set_page_config(page_title="DeskBot // Workspace", page_icon="⚡", layout="wide", initial_sidebar_state="expanded")
+st.set_page_config(page_title="DeskBot Workspace", page_icon="⚡", layout="wide", initial_sidebar_state="expanded")
 
-# Injecting Industrial-Grade CSS to force the Notion Look
+# Aggressive CSS injection to override Streamlit defaults for a premium feel.
 st.markdown("""
 <style>
-    /* 1. NOTION DARK THEME BACKGROUND */
-    .stApp {background-color: #191919; color: #E0E0E0;}
+    /* Main Background */
+    .stApp {background-color: #191919; color: #E0E0E0; font-family: sans-serif;}
     
-    /* 2. SIDEBAR STYLING */
-    [data-testid="stSidebar"] {
-        background-color: #202020;
-        border-right: 1px solid #2F2F2F;
+    /* Sidebar Background & Border */
+    section[data-testid="stSidebar"] {background-color: #202020; border-right: 1px solid #2F2F2F;}
+    
+    /* Inputs & Selectboxes - Dark and Flat */
+    .stTextInput input, .stTextArea textarea, .stSelectbox div[data-baseweb="select"], .stDataEditor div[data-baseweb="data-grid"] {
+        background-color: #2B2B2B !important; color: #E0E0E0 !important;
+        border: 1px solid #3F3F3F !important; border-radius: 6px;
     }
     
-    /* 3. FLATTENED INPUTS */
-    .stTextInput input, .stTextArea textarea, .stSelectbox div[data-baseweb="select"] {
-        background-color: #2B2B2B !important;
-        color: white !important;
-        border: 1px solid #3F3F3F !important;
-        border-radius: 6px;
-    }
-    
-    /* 4. HIDE STREAMLIT BRANDING */
-    #MainMenu {visibility: hidden;}
-    header {visibility: hidden;}
-    footer {visibility: hidden;}
-    .block-container {padding-top: 2rem; padding-bottom: 5rem;}
+    /* Hide Streamlit Header/Footer Clutter */
+    header[data-testid="stHeader"], footer, #MainMenu {display: none;}
+    .block-container {padding-top: 1.5rem; padding-bottom: 3rem;}
 
-    /* 5. TABS (Minimalist) */
-    .stTabs [data-baseweb="tab-list"] {gap: 20px; border-bottom: 1px solid #333;}
-    .stTabs [data-baseweb="tab"] {height: 40px; border: none; background: transparent; color: #888;}
+    /* Minimalist Tabs */
+    .stTabs [data-baseweb="tab-list"] {gap: 16px; border-bottom: 1px solid #333;}
+    .stTabs [data-baseweb="tab"] {height: 40px; border: none; background: transparent; color: #888; font-weight: 500;}
     .stTabs [aria-selected="true"] {color: #FFF !important; border-bottom: 2px solid #FFF;}
 
-    /* 6. CHAT BUBBLES (Clean) */
-    .stChatMessage {background-color: transparent; border: none; padding: 5px;}
-    [data-testid="stChatMessageAvatarUser"] {display: none;}
-    [data-testid="stChatMessageAvatarAssistant"] {display: none;}
+    /* Clean Chat Bubbles (No Avatars) */
+    .stChatMessage {background-color: transparent; border: none; padding: 5px 0;}
+    [data-testid="stChatMessageAvatarUser"], [data-testid="stChatMessageAvatarAssistant"] {display: none !important;}
     
-    /* 7. CUSTOM BUTTONS */
-    div.stButton > button {
-        background-color: #2B2B2B; color: #EEE; border: 1px solid #444; width: 100%; text-align: left;
+    /* Custom Buttons */
+    .stButton button {
+        background-color: #2B2B2B; color: #CCC; border: 1px solid #444; border-radius: 6px; transition: all 0.2s;
     }
-    div.stButton > button:hover {border-color: #FFF; color: #FFF;}
+    .stButton button:hover {border-color: #FFF; color: #FFF; background-color: #333;}
 </style>
 """, unsafe_allow_html=True)
 
-# Session State Initialization
+# Session State Management
 if "user" not in st.session_state: st.session_state.user = None
 if "active_ws_id" not in st.session_state: st.session_state.active_ws_id = None
 if "chat_session" not in st.session_state: st.session_state.chat_session = None
@@ -71,20 +64,21 @@ if "chat_session" not in st.session_state: st.session_state.chat_session = None
 # ==============================================================================
 @st.cache_resource
 def init_supabase():
-    url = st.secrets["SUPABASE_URL"]
-    key = st.secrets["SUPABASE_KEY"]
-    return create_client(url, key)
+    try:
+        url = st.secrets["SUPABASE_URL"]
+        key = st.secrets["SUPABASE_KEY"]
+        return create_client(url, key)
+    except: st.error("🚨 Critical Error: Supabase Secrets Missing."); st.stop()
 
-try: supabase = init_supabase()
-except: st.error("⚠️ CRITICAL: Database Connection Failed.")
+supabase = init_supabase()
 
 # ==============================================================================
-# 3. DATA LAYER (The Brain)
+# 3. DATA LAYER (The Source of Truth)
 # ==============================================================================
 class DB:
+    """Static class for organized database interactions."""
     @staticmethod
     def log_login(user_id):
-        # FEATURE: Login History Tracking
         try: supabase.table("login_logs").insert({"user_id": user_id}).execute()
         except: pass
 
@@ -107,20 +101,15 @@ class DB:
         try:
             res = supabase.table("tasks").select("*").eq("workspace_id", ws_id).order("id", desc=True).execute()
             df = pd.DataFrame(res.data)
-            if not df.empty:
-                # FIX: Force data types to prevent StreamlitAPIException
-                df["id"] = pd.to_numeric(df["id"]).astype(int)
-                # Keep due_date as STRING for Calendar compatibility
-                df["due_date"] = df["due_date"].astype(str)
+            # Ensure IDs are integers for editor compatibility
+            if not df.empty: df["id"] = pd.to_numeric(df["id"]).astype(int)
             return df
         except: return pd.DataFrame()
 
     @staticmethod
     def create_task(user_id, ws_id, title, est, due):
         try:
-            supabase.table("tasks").insert({
-                "user_id": user_id, "workspace_id": ws_id, "title": title, "est_minutes": est, "due_date": due
-            }).execute()
+            supabase.table("tasks").insert({"user_id": user_id, "workspace_id": ws_id, "title": title, "est_minutes": est, "due_date": due}).execute()
             return True
         except: return False
 
@@ -141,8 +130,7 @@ class DB:
 
     @staticmethod
     def get_docs(ws_id):
-        try:
-            return supabase.table("documents").select("*").eq("workspace_id", ws_id).execute().data
+        try: return supabase.table("documents").select("*").eq("workspace_id", ws_id).execute().data
         except: return []
 
     @staticmethod
@@ -160,12 +148,11 @@ class DB:
 
     @staticmethod
     def get_chat(ws_id):
-        try:
-            return supabase.table("chat_history").select("*").eq("workspace_id", ws_id).order("created_at").execute().data
+        try: return supabase.table("chat_history").select("*").eq("workspace_id", ws_id).order("created_at").execute().data
         except: return []
 
 # ==============================================================================
-# 4. UTILS & AI
+# 4. UTILITIES & AI AGENT
 # ==============================================================================
 def image_to_base64(image):
     buffered = BytesIO()
@@ -185,143 +172,154 @@ def extract_pdf(file):
 if "GOOGLE_API_KEY" in st.secrets:
     genai.configure(api_key=st.secrets["GOOGLE_API_KEY"])
     
-    def add_task_tool(task_title: str, duration_minutes: int, due_date: str):
-        """Adds a task. Duration INT. Date YYYY-MM-DD."""
-        if not st.session_state.active_ws_id: return "Error: Select Workspace."
+    # Tool for the AI
+    def add_task_tool(task_title: str, due_date_iso: str = None):
+        """Adds a task. due_date_iso must be 'YYYY-MM-DD' format or None."""
+        ws_id = st.session_state.active_ws_id
+        if not ws_id: return "Error: No active workspace."
         try:
-            if not isinstance(duration_minutes, int): duration_minutes = 60
-            DB.create_task(st.session_state.user.id, st.session_state.active_ws_id, task_title, duration_minutes, due_date)
-            return f"✅ Scheduled: {task_title}"
-        except: return "❌ DB Error"
+            DB.create_task(st.session_state.user.id, ws_id, task_title, 60, due_date_iso)
+            return f"✅ Added task: {task_title} (Due: {due_date_iso})"
+        except Exception as e: return f"❌ Database Error: {e}"
 
     model = genai.GenerativeModel('gemini-2.0-flash', tools=[add_task_tool])
+    
+    # Ensure fresh session for tool use
     if "chat_session" not in st.session_state or st.session_state.chat_session is None:
         st.session_state.chat_session = model.start_chat(enable_automatic_function_calling=True)
 
 def ask_agent(msg, ctx, img=None):
     try:
         today = datetime.now().strftime("%Y-%m-%d")
-        prompt = [f"SYSTEM: Date {today}. If user gives time, put in Title.", f"CTX:\n{ctx}", f"USER: {msg}"]
+        prompt = [f"SYSTEM: Today is {today}. Use 'add_task_tool' if user wants to schedule something.", f"CONTEXT:\n{ctx}", f"USER: {msg}"]
         if img: prompt.append(img)
         return st.session_state.chat_session.send_message(prompt).text
     except Exception as e: return f"AI Error: {e}"
 
 def generate_mindmap(topic, ctx):
     try:
-        prompt = f"Context: {ctx[:5000]}\nGenerate Graphviz DOT code for a mindmap on '{topic}'. Output ONLY the DOT code inside ```dot blocks."
+        prompt = f"Context: {ctx[:4000]}\nGenerate Graphviz DOT code for a mindmap on '{topic}'. Output ONLY the DOT code inside ```dot blocks. Keep it hierarchical and clean."
         resp = model.generate_content(prompt)
         match = re.search(r'```dot\n(.*?)\n```', resp.text, re.DOTALL)
         return match.group(1) if match else None
     except: return None
 
 # ==============================================================================
-# 5. UI VIEWS
+# 5. APP VIEWS
 # ==============================================================================
 def auth_view():
-    c1, c2, c3 = st.columns([1,1.5,1])
+    c1, c2, c3 = st.columns([1, 1.5, 1])
     with c2:
         st.markdown("<h1 style='text-align: center;'>⚡ DeskBot</h1>", unsafe_allow_html=True)
         tab1, tab2 = st.tabs(["Login", "Sign Up"])
         with tab1:
             with st.form("login"):
                 e = st.text_input("Email"); p = st.text_input("Password", type="password")
-                if st.form_submit_button("Enter", use_container_width=True):
+                if st.form_submit_button("Login", use_container_width=True):
                     try:
                         res = supabase.auth.sign_in_with_password({"email":e,"password":p})
                         st.session_state.user = res.user
-                        DB.log_login(res.user.id) # FEATURE: Login History Logged Here
+                        DB.log_login(res.user.id) # Audit trail
                         st.rerun()
-                    except: st.error("Invalid Credentials")
+                    except: st.error("Bad credentials.")
         with tab2:
             with st.form("signup"):
                 e = st.text_input("Email"); p = st.text_input("Password (min 6)")
-                if st.form_submit_button("Create", use_container_width=True):
+                if st.form_submit_button("Create Account", use_container_width=True):
                     try:
                         res = supabase.auth.sign_up({"email":e,"password":p})
                         st.session_state.user = res.user
-                        st.success("Created! Login now."); st.rerun()
-                    except: st.error("Error creating account")
+                        st.success("Created! Log in now."); st.rerun()
+                    except: st.error("Signup failed.")
 
 def main_view():
     user = st.session_state.user
-    
-    # --- 🧠 CRITICAL FIX: AUTO-CREATE WORKSPACE ---
-    # This block ensures the dropdown NEVER appears empty
-    workspaces = DB.get_workspaces(user.id)
-    if workspaces.empty:
+    workspaces_df = DB.get_workspaces(user.id)
+
+    # --- CRITICAL: AUTO-INITIALIZE WORKSPACE ---
+    # If no workspaces exist, create one immediately so the UI never breaks.
+    if workspaces_df.empty:
         new_id = DB.create_workspace(user.id, "General")
         st.session_state.active_ws_id = new_id
-        st.rerun() 
-        
-    if st.session_state.active_ws_id is None and not workspaces.empty:
-        st.session_state.active_ws_id = int(workspaces.iloc[0]['id'])
+        st.rerun()
+
+    # Ensure active ID is valid
+    if st.session_state.active_ws_id not in workspaces_df['id'].values:
+         st.session_state.active_ws_id = workspaces_df.iloc[0]['id']
 
     active_ws_id = st.session_state.active_ws_id
-    # Safety check for title
-    if not workspaces[workspaces['id'] == active_ws_id].empty:
-        active_ws_title = workspaces[workspaces['id'] == active_ws_id].iloc[0]['title']
-    else:
-        active_ws_title = "Workspace"
+    active_ws_title = workspaces_df[workspaces_df['id'] == active_ws_id].iloc[0]['title']
 
-    # --- SIDEBAR (NAVIGATION) ---
+    # --- SIDEBAR ---
     with st.sidebar:
-        st.markdown(f"**{user.email}**")
-        st.markdown("### 📂 Workspaces")
+        st.caption(f"👤 {user.email}")
+        st.markdown("---")
         
-        # Workspace Switcher (Persistent)
-        for i, row in workspaces.iterrows():
-            # Highlight active workspace
-            label = f"🟦 {row['title']}" if row['id'] == active_ws_id else f"⬜ {row['title']}"
-            if st.button(label, key=f"ws_{row['id']}"):
-                st.session_state.active_ws_id = row['id']
-                st.rerun()
+        # --- WORKSPACE SWITCHER (The Core Feature) ---
+        st.markdown("### 🔄 Switch Workspace")
         
-        with st.popover("➕ New Workspace", use_container_width=True):
-            new_ws_name = st.text_input("Name")
-            if st.button("Create"):
-                DB.create_workspace(user.id, new_ws_name)
-                st.rerun()
+        # Create dictionary for dropdown: {title: id}
+        ws_map = dict(zip(workspaces_df['title'], workspaces_df['id']))
+        # Reverse map to find current title from ID
+        id_map = dict(zip(workspaces_df['id'], workspaces_df['title']))
+        current_title = id_map.get(active_ws_id)
 
-        st.markdown("### 📄 Sources")
+        selected_title = st.selectbox(
+            "Select Workspace",
+            options=workspaces_df['title'].tolist(),
+            index=workspaces_df['title'].tolist().index(current_title) if current_title else 0,
+            label_visibility="collapsed"
+        )
+
+        # Detect switch and update state immediately
+        if selected_title and ws_map[selected_title] != active_ws_id:
+            st.session_state.active_ws_id = ws_map[selected_title]
+            st.rerun()
+
+        # New Workspace Popover
+        with st.popover("➕ Create New Workspace", use_container_width=True):
+            new_name = st.text_input("Workspace Name", placeholder="e.g., Physics Project")
+            if st.button("Create"):
+                if new_name:
+                    DB.create_workspace(user.id, new_name)
+                    st.rerun()
         
-        if active_ws_id:
-            docs = DB.get_docs(active_ws_id)
-            if docs:
-                for d in docs:
-                    c1, c2 = st.columns([5,1])
-                    c1.caption(f"📄 {d['filename'][:18]}...")
-                    if c2.button("×", key=f"del_{d['id']}"): DB.delete_doc(d['id']); st.rerun()
-            else: st.caption("No sources attached.")
+        st.markdown("---")
+        
+        # --- SOURCES SECTION ---
+        st.markdown("### 📄 Sources (Active Workspace)")
+        docs = DB.get_docs(active_ws_id)
+        if docs:
+            for d in docs:
+                c1, c2 = st.columns([4, 1])
+                c1.caption(f"{d['filename'][:20]}")
+                if c2.button("🗑️", key=f"del_{d['id']}"): DB.delete_doc(d['id']); st.rerun()
+        else:
+            st.caption("No sources attached.")
             
-            with st.expander("Upload"):
-                up_file = st.file_uploader("File", type=["pdf", "png", "jpg"], label_visibility="collapsed")
-                if up_file:
-                    if up_file.type == "application/pdf":
-                        if st.button("Index PDF", use_container_width=True):
-                            txt = extract_pdf(up_file)
-                            if txt: DB.save_doc(user.id, active_ws_id, up_file.name, txt); st.toast("Saved!"); st.rerun()
-                    else: st.image(Image.open(up_file), width=100)
+        with st.expander("Upload PDF/Image"):
+            up_file = st.file_uploader("File", type=["pdf", "png", "jpg"], label_visibility="collapsed")
+            if up_file and up_file.type == "application/pdf":
+                 if st.button("Index PDF"):
+                     txt = extract_pdf(up_file)
+                     if txt: DB.save_doc(user.id, active_ws_id, up_file.name, txt); st.toast("PDF Indexed!"); st.rerun()
 
         st.markdown("---")
-        if st.button("⚙️ Settings", use_container_width=True):
-            st.toast("Login History & Account Settings (v1.0)")
-            
-        if st.button("Log Out", use_container_width=True): 
+        if st.button("Log Out", use_container_width=True):
             supabase.auth.sign_out()
             st.session_state.user = None
             st.rerun()
 
-    # --- MAIN SPLIT LAYOUT ---
-    col_chat, col_studio = st.columns([1, 1.3], gap="large")
+    # --- MAIN CANVAS ---
+    col_chat, col_studio = st.columns([1, 1.4], gap="medium")
 
-    # === LEFT: CHAT ===
+    # === LEFT COLUMN: CHAT ===
     with col_chat:
         st.markdown(f"### 💬 {active_ws_title}")
-        chat_cont = st.container(height=600)
-        
-        with chat_cont:
+        chat_box = st.container(height=600)
+        with chat_box:
             history = DB.get_chat(active_ws_id)
-            if not history: st.info("Workspace ready.")
+            if not history: st.markdown("Start the conversation...")
             for msg in history:
                 with st.chat_message(msg["role"]):
                     if msg.get("image_data"):
@@ -329,87 +327,91 @@ def main_view():
                         except: pass
                     st.write(msg["content"])
 
-        if p := st.chat_input("Command..."):
-            img, img64 = None, None
+        # Input handling (Text + optional Image from sidebar)
+        if prompt := st.chat_input("Ask about this workspace..."):
+            img_data = None; pil_img = None
             if 'up_file' in locals() and up_file and up_file.type != "application/pdf":
-                img = Image.open(up_file); img64 = image_to_base64(img)
+                pil_img = Image.open(up_file); img_data = image_to_base64(pil_img)
 
-            DB.save_chat(user.id, active_ws_id, "user", p, img64)
+            DB.save_chat(user.id, active_ws_id, "user", prompt, img_data)
             
-            tasks = DB.get_tasks(active_ws_id)
-            ctx = tasks.to_string() if not tasks.empty else "No tasks."
+            # Build context from Tasks and Docs belonging to THIS workspace
+            tasks_df = DB.get_tasks(active_ws_id)
+            ctx = "TASKS:\n" + tasks_df.to_string() if not tasks_df.empty else "TASKS: None."
             docs = DB.get_docs(active_ws_id)
-            for d in docs: ctx += f"\nDOC: {d['content'][:15000]}"
+            for d in docs: ctx += f"\nDOC: {d['filename']}\nCONTENT: {d['content'][:10000]}"
 
-            with st.spinner("Processing..."):
-                reply = ask_agent(p, ctx, img)
+            with st.spinner("Thinking..."):
+                reply = ask_agent(prompt, ctx, pil_img)
             
             DB.save_chat(user.id, active_ws_id, "assistant", reply)
             st.rerun()
 
-    # === RIGHT: STUDIO ===
+    # === RIGHT COLUMN: STUDIO TOOLS ===
     with col_studio:
         st.markdown("### 🛠️ Studio")
-        t1, t2, t3 = st.tabs(["Plan", "Map", "Brief"])
+        t1, t2, t3 = st.tabs(["📅 Schedule", "🧠 Mind Map", "📝 Summary"])
 
-        with t1: # Plan
-            tasks = DB.get_tasks(active_ws_id)
-            if not tasks.empty:
-                evts = []
-                for _, r in tasks.iterrows():
-                    if r['due_date'] and r['due_date'] != "NaT":
-                        evts.append({"title": r['title'], "start": r['due_date'], "allDay": True, "backgroundColor": "#3788d8"})
-                calendar(events=evts, options={"headerToolbar": {"left": "prev,next", "center": "title", "right": "dayGridMonth"}, "height": 350})
+        # 1. Schedule Tab (Calendar + Grid)
+        with t1:
+            tasks_df = DB.get_tasks(active_ws_id)
+            if not tasks_df.empty:
+                cal_events = []
+                for _, row in tasks_df.iterrows():
+                    if row['due_date']:
+                        color = "#2ecc71" if row['status'] == 'done' else "#3498db"
+                        cal_events.append({"title": row['title'], "start": row['due_date'], "allDay": True, "backgroundColor": color})
+                calendar(events=cal_events, options={"headerToolbar": {"left": "prev,next", "center": "title", "right": "dayGridMonth"}, "height": 350})
                 
                 st.divider()
-                # FIX: Data Editor configuration to prevent crash
+                # Editable Grid
                 edited = st.data_editor(
-                    tasks, 
-                    key=f"ed_{active_ws_id}", 
-                    hide_index=True, 
-                    use_container_width=True,
+                    tasks_df, key=f"ed_{active_ws_id}", hide_index=True, use_container_width=True,
                     column_config={
                         "id": None, "user_id": None, "workspace_id": None, "created_at": None, "est_minutes": None,
                         "title": st.column_config.TextColumn("Task"),
-                        "due_date": st.column_config.DateColumn("Due"),
+                        "due_date": st.column_config.DateColumn("Due Date"),
                         "status": st.column_config.SelectboxColumn("Status", options=["todo", "done"])
                     }
                 )
-                
+                # Handle Grid Edits/Deletes
                 if st.session_state[f"ed_{active_ws_id}"]["edited_rows"]:
-                    for i, u in st.session_state[f"ed_{active_ws_id}"]["edited_rows"].items():
-                        # Convert Date Object back to String for DB
-                        if "due_date" in u and u["due_date"]:
-                            u["due_date"] = u["due_date"].strftime('%Y-%m-%d')
-                        DB.update_task(tasks.iloc[i]["id"], u)
+                    for i, updates in st.session_state[f"ed_{active_ws_id}"]["edited_rows"].items():
+                        if "due_date" in updates and updates["due_date"]:
+                             updates["due_date"] = updates["due_date"].isoformat() # Convert Date -> String for DB
+                        DB.update_task(tasks_df.iloc[i]["id"], updates)
                     st.rerun()
                 if st.session_state[f"ed_{active_ws_id}"]["deleted_rows"]:
                     for i in st.session_state[f"ed_{active_ws_id}"]["deleted_rows"]:
-                        DB.delete_task(tasks.iloc[i]["id"])
+                        DB.delete_task(tasks_df.iloc[i]["id"])
                     st.rerun()
-            else: st.info("No active tasks.")
+            else: st.info("No tasks in this workspace.")
 
-        with t2: # Map
-            if st.button("Generate Graph"):
+        # 2. Mind Map Tab
+        with t2:
+            if st.button("Generate Graph", use_container_width=True):
                 docs = DB.get_docs(active_ws_id)
-                txt = "".join([d['content'][:10000] for d in docs])
+                txt = "".join([d['content'][:8000] for d in docs])
                 if txt:
-                    dot = generate_mindmap(active_ws_title, txt)
-                    if dot: st.graphviz_chart(dot)
-                    else: st.error("Failed")
-                else: st.warning("Upload PDF first")
+                    with st.spinner("Visualizing..."):
+                        dot = generate_mindmap(active_ws_title, txt)
+                        if dot: st.graphviz_chart(dot)
+                        else: st.error("Could not visualize data.")
+                else: st.warning("Upload a PDF to this workspace first.")
 
-        with t3: # Brief
-            if st.button("Synthesize"):
+        # 3. Summary Tab
+        with t3:
+            if st.button("Synthesize Summary", use_container_width=True):
                 docs = DB.get_docs(active_ws_id)
-                txt = "".join([d['content'][:15000] for d in docs])
+                txt = "".join([d['content'][:12000] for d in docs])
                 if txt:
-                    s = ask_agent("Executive Summary", txt)
-                    st.markdown(s)
-                else: st.warning("Upload PDF first")
+                    with st.spinner("Summarizing..."):
+                        s = ask_agent("Provide a structured executive summary of these documents.", txt)
+                        st.markdown(s)
+                else: st.warning("Upload a PDF to this workspace first.")
 
 # ==============================================================================
-# 7. EXECUTION
+# 6. EXECUTION ROOT
 # ==============================================================================
 if st.session_state.user: main_view()
 else: auth_view()
